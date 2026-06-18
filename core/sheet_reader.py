@@ -21,6 +21,24 @@ _cache = {
 }
 
 
+def _sheet_cfg():
+    """Lay (ten_sheet, tab_thong_tin, tab_input) tu settings.json.
+
+    Moi may co the dung sheet khac -> doi o tab Auto Convert > Cai dat nang cao,
+    hoac sua truc tiep config/settings.json: "sheet_name".
+    """
+    try:
+        from utils.config import Config
+        c = Config()
+        return (
+            (c.get("sheet_name", "KA") or "KA"),
+            (c.get("sheet_tab_info", "THÔNG TIN") or "THÔNG TIN"),
+            (c.get("sheet_tab_input", "INPUT") or "INPUT"),
+        )
+    except Exception:
+        return "KA", "THÔNG TIN", "INPUT"
+
+
 def _get_client():
     """Tạo gspread client từ creds.json."""
     import gspread
@@ -48,7 +66,8 @@ def read_voice_map(client=None) -> Dict[str, str]:
     if client is None:
         client = _get_client()
 
-    ws = client.open("KA").worksheet("THÔNG TIN")
+    name, tab_info, _ = _sheet_cfg()
+    ws = client.open(name).worksheet(tab_info)
     rows = ws.get_all_values()
 
     voice_map = {}
@@ -72,7 +91,8 @@ def read_folder_map(client=None) -> Dict[str, str]:
     if client is None:
         client = _get_client()
 
-    ws = client.open("KA").worksheet("INPUT")
+    name, _, tab_input = _sheet_cfg()
+    ws = client.open(name).worksheet(tab_input)
     rows = ws.get_all_values()
 
     folder_map = {}

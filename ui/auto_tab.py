@@ -384,6 +384,12 @@ class AutoSettingsDialog(QDialog):
         self.chk_srt.setChecked(bool(c.get("auto_create_srt", True)))
         form.addRow("", self.chk_srt)
 
+        self.ed_sheet = QLineEdit(str(c.get("sheet_name", "KA")))
+        self.ed_sheet.setToolTip(
+            "Tên Google Sheet đọc voice/folder (tab THÔNG TIN + INPUT).\n"
+            "Máy khác dùng sheet khác thì đổi tên ở đây (đã thay creds.json tương ứng).")
+        form.addRow("Tên Google Sheet:", self.ed_sheet)
+
         v.addLayout(form)
 
         row = QHBoxLayout()
@@ -411,6 +417,9 @@ class AutoSettingsDialog(QDialog):
         c.set("auto_create_srt", self.chk_srt.isChecked())
         c.set("poll_interval", self.sp_poll.value())
         c.set("stable_wait", self.sp_stable.value())
+        sheet = self.ed_sheet.text().strip()
+        if sheet:
+            c.set("sheet_name", sheet)
         QMessageBox.information(self, "Cài đặt", "✅ Đã lưu chỉ số voice.")
         self.accept()
 
