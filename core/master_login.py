@@ -4,6 +4,7 @@ refresh_token tu localStorage Firebase -> them vao masters_store.
 
 Dung trong GUI (nut "Them Master"): browser mo trong session user nen THAY duoc.
 """
+import os
 import json
 import time
 import socket
@@ -13,15 +14,51 @@ FB_KEY = "AIzaSyBSsRE_1Os04-bxpd5JTLIniy3UK4OqKys"
 LS_KEY = f"firebase:authUser:{FB_KEY}:[DEFAULT]"
 
 
+def _find_chrome():
+    """Tim duong dan chrome.exe (PATH + cac vi tri pho bien + registry)."""
+    import shutil
+    for name in ("chrome", "chrome.exe"):
+        p = shutil.which(name)
+        if p:
+            return p
+    cands = [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for p in cands:
+        if p and os.path.exists(p):
+            return p
+    try:
+        import winreg
+        for hk in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                k = winreg.OpenKey(
+                    hk, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
+                v, _ = winreg.QueryValueEx(k, None)
+                if v and os.path.exists(v):
+                    return v
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def _fresh_browser():
     """1 Chrome SACH, doc lap (profile rieng + port rieng) -> moi TK 1 Chrome.
 
     -> (ChromiumPage, profile_dir_de_xoa).
     """
     from DrissionPage import ChromiumPage, ChromiumOptions
+    chrome = _find_chrome()
+    if not chrome:
+        raise RuntimeError(
+            "Chua cai Google Chrome! Tai tai https://www.google.com/chrome roi thu lai.")
     s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
     profile = tempfile.mkdtemp(prefix="master_")
     co = ChromiumOptions()
+    co.set_browser_path(chrome)     # chi ro chrome.exe -> chac chan mo dung
     co.set_argument("--no-first-run")
     co.set_argument("--no-default-browser-check")
     co.set_argument("--no-proxy-server")
