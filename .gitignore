@@ -1,0 +1,17 @@
+# === KHONG PUSH: du lieu rieng tung may (CHUA CREDENTIAL - repo public!) ===
+config/
+logs/
+output/
+
+# === Binary lon (vuot gioi han GitHub, copy tay) ===
+ffmpeg/
+
+# === Cache / tam ===
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.bak
+*.tmp
+.claude/
+crash.log
