@@ -8,16 +8,16 @@ echo.
 
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python not found!
-    echo Download: https://www.python.org/downloads/
-    echo Tick "Add Python to PATH" when installing!
+    echo [ERROR] Khong tim thay Python!
+    echo Tai: https://www.python.org/downloads/
+    echo Nho TICK "Add Python to PATH" khi cai!
     pause
     exit /b 1
 )
 echo [OK] Python found
 
 echo.
-echo Installing packages (tu requirements.txt)...
+echo Cai package (tu requirements.txt)...
 python -m pip install --upgrade pip --quiet
 python -m pip install -r requirements.txt
 if errorlevel 1 (
@@ -32,14 +32,20 @@ if not exist "logs" mkdir logs
 if not exist "output" mkdir output
 
 echo.
+echo Tao shortcut chay tool...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0make_shortcut.ps1"
+
+echo.
 echo ========================================
-echo   SETUP DONE!
+echo   SETUP XONG!
 echo ========================================
 echo.
-echo LUU Y khi chay may khac:
-echo  - Mo tab "4G Proxy" -^> nut "Cai dat 4G" de chinh IP/cong cho dung may.
-echo  - Can cai san: Google Chrome (cho login master) va ffmpeg co san trong thu muc ffmpeg/.
+echo Chay tool: double-click "START_GUI" (trong thu muc) hoac
+echo            shortcut "11Lab Voice Tool" ngoai Desktop.
 echo.
-echo Run: python run.py   (hoac double-click START.bat)
+echo LUU Y may moi:
+echo  - Tab "4G Proxy" -^> "Cai dat 4G": chinh IP/cong cho dung.
+echo  - Tab "Auto Convert" -^> "Cai dat nang cao": doi "Ten Google Sheet".
+echo  - Can cai Google Chrome (de login master).
 echo.
 pause
