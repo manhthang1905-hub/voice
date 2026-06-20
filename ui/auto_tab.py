@@ -134,8 +134,9 @@ class AutoWorker(QThread):
     def _do_cycle(self):
         from core.sheet_reader import read_all
 
-        # 1. Đọc Sheet
-        voice_map, folder_map = read_all()
+        # 1. Đọc Sheet — LUON doc moi (force) de bat duoc data moi them vao Sheet.
+        #    (truoc day dung cache 5 phut -> phai tat/mo lai tool moi thay data moi)
+        voice_map, folder_map = read_all(force=True)
         self.sheet_loaded.emit(len(voice_map), len(folder_map))
         self.log_signal.emit(
             f"  Sheet: {len(voice_map)} voice, {len(folder_map)} mã")
