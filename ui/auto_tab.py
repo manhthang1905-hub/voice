@@ -675,11 +675,17 @@ class AutoTab(QWidget):
         voice_dir = self.dir_input.text().strip()
         if not os.path.isdir(voice_dir):
             # Thu map o mang roi kiem tra lai (thuong do o mang chua ket noi)
+            from core.net_drive import is_enabled
+            if not is_enabled(self.config.data):
+                self._log(f"❌ Thư mục không tồn tại: {voice_dir}")
+                self._log("   → Vào ⚙ Cài đặt nâng cao > Ổ mạng: BẬT 'tự map ổ mạng' "
+                          "+ điền drive/share/user/mật khẩu (192.168.88.254) rồi Lưu.")
+                return
             self._try_map_drive(force=True)
             if not os.path.isdir(voice_dir):
                 self._log(f"❌ Thư mục không tồn tại: {voice_dir}")
-                self._log("   (Đã thử map ổ mạng nhưng vẫn không thấy — "
-                          "kiểm tra Cài đặt nâng cao > Ổ mạng + máy chủ 192.168.88.254)")
+                self._log("   (Đã map ổ mạng nhưng vẫn không thấy — kiểm tra "
+                          "user/mật khẩu/share đúng chưa, máy chủ 192.168.88.254 có bật không)")
                 return
 
         poll = int(self.config.get("poll_interval", 300))
