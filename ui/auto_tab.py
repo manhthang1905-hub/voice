@@ -134,6 +134,22 @@ class AutoWorker(QThread):
     def _do_cycle(self):
         from core.sheet_reader import read_all
 
+        # 0. Neu thu muc mat (o mang rot) -> thu map lai roi kiem tra
+        if not os.path.isdir(self.voice_dir):
+            try:
+                from utils.config import Config
+                from core.net_drive import map_drive, is_enabled
+                cfg = Config().data
+                if is_enabled(cfg):
+                    self.log_signal.emit("🔌 Mất thư mục → map lại ổ mạng...")
+                    ok, msg = map_drive(cfg, force_remap=True)
+                    self.log_signal.emit(f"   Map ổ: {'OK' if ok else 'lỗi'} ({msg})")
+            except Exception as e:
+                self.log_signal.emit(f"   Map ổ lỗi: {str(e)[:60]}")
+            if not os.path.isdir(self.voice_dir):
+                self.log_signal.emit(f"❌ Thư mục vẫn không tồn tại: {self.voice_dir}")
+                return
+
         # 1. Đọc Sheet — LUON doc moi (force) de bat duoc data moi them vao Sheet.
         #    (truoc day dung cache 5 phut -> phai tat/mo lai tool moi thay data moi)
         voice_map, folder_map = read_all(force=True)
@@ -299,6 +315,25 @@ class AutoWorker(QThread):
         return channels
 
 
+class MapDriveWorker(QThread):
+    """Map o mang (net use) chay nen luc mo tool -> khong treo GUI."""
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            from core.net_drive import map_drive
+            letter = self.cfg.get("map_drive_letter", "")
+            self.log_signal.emit(f"🔌 Map ổ mạng {letter} lúc mở tool...")
+            ok, msg = map_drive(self.cfg, force_remap=False)
+            self.log_signal.emit(f"   Map ổ: {'OK' if ok else 'lỗi'} ({msg})")
+        except Exception as e:
+            self.log_signal.emit(f"   Map ổ lỗi: {str(e)[:60]}")
+
+
 # ============================================================
 # DIALOG CAI DAT NANG CAO (chinh chi so voice)
 # ============================================================
@@ -393,6 +428,25 @@ class AutoSettingsDialog(QDialog):
 
         v.addLayout(form)
 
+        # === Map o mang (net use) — chay khi mo tool / khi thu muc khong ton tai ===
+        gbox = QGroupBox("Ổ mạng (net use) — tự map khi mở tool / khi mất thư mục")
+        gl = QFormLayout(gbox)
+        self.chk_map = QCheckBox("Bật tự map ổ mạng")
+        self.chk_map.setChecked(bool(c.get("map_drive_enabled", False)))
+        gl.addRow("", self.chk_map)
+        self.ed_map_letter = QLineEdit(str(c.get("map_drive_letter", "Z:")))
+        gl.addRow("Ổ (drive):", self.ed_map_letter)
+        self.ed_map_share = QLineEdit(str(c.get("map_drive_share", r"\\192.168.88.254\D")))
+        gl.addRow("Đường dẫn share:", self.ed_map_share)
+        self.ed_map_user = QLineEdit(str(c.get("map_drive_user", "smbuser")))
+        gl.addRow("User:", self.ed_map_user)
+        self.ed_map_pass = QLineEdit(str(c.get("map_drive_pass", "")))
+        gl.addRow("Mật khẩu:", self.ed_map_pass)
+        hint = QLabel("VD: ổ Z: , share \\\\192.168.88.254\\D , user smbuser")
+        hint.setStyleSheet("color:#888; font-size:10px;")
+        gl.addRow("", hint)
+        v.addWidget(gbox)
+
         row = QHBoxLayout()
         row.addStretch()
         btn_save = QPushButton("💾 Lưu")
@@ -421,6 +475,12 @@ class AutoSettingsDialog(QDialog):
         sheet = self.ed_sheet.text().strip()
         if sheet:
             c.set("sheet_name", sheet)
+        # map o mang
+        c.set("map_drive_enabled", self.chk_map.isChecked())
+        c.set("map_drive_letter", self.ed_map_letter.text().strip())
+        c.set("map_drive_share", self.ed_map_share.text().strip())
+        c.set("map_drive_user", self.ed_map_user.text().strip())
+        c.set("map_drive_pass", self.ed_map_pass.text().strip())
         QMessageBox.information(self, "Cài đặt", "✅ Đã lưu chỉ số voice.")
         self.accept()
 
@@ -439,7 +499,21 @@ class AutoTab(QWidget):
         self._countdown = 0
         self._countdown_timer = QTimer()
         self._countdown_timer.timeout.connect(self._tick_countdown)
+        self._map_worker = None
         self._init_ui()
+        # Map o mang luc mo tool (neu bat) - chay nen, khong treo GUI
+        QTimer.singleShot(800, self._startup_map)
+
+    def _startup_map(self):
+        try:
+            from core.net_drive import is_enabled
+            if not is_enabled(self.config.data):
+                return
+            self._map_worker = MapDriveWorker(self.config.data)
+            self._map_worker.log_signal.connect(self._log)
+            self._map_worker.start()
+        except Exception:
+            pass
 
     def _update_cfg_label(self):
         c = self.config
@@ -456,6 +530,21 @@ class AutoTab(QWidget):
         dlg = AutoSettingsDialog(self.config, self)
         if dlg.exec_():
             self._update_cfg_label()
+
+    def _try_map_drive(self, force=False):
+        """Map o mang (net use) neu bat trong cai dat. -> True neu chay/OK."""
+        try:
+            from core.net_drive import map_drive, is_enabled
+            cfg = self.config.data
+            if not is_enabled(cfg):
+                return False
+            self._log(f"🔌 Đang map ổ mạng {cfg.get('map_drive_letter','')}...")
+            ok, msg = map_drive(cfg, on_log=lambda m: None, force_remap=force)
+            self._log(f"   Map ổ: {'OK' if ok else 'lỗi'} ({msg})")
+            return ok
+        except Exception as e:
+            self._log(f"   Map ổ lỗi: {str(e)[:60]}")
+            return False
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -585,8 +674,13 @@ class AutoTab(QWidget):
 
         voice_dir = self.dir_input.text().strip()
         if not os.path.isdir(voice_dir):
-            self._log(f"❌ Thư mục không tồn tại: {voice_dir}")
-            return
+            # Thu map o mang roi kiem tra lai (thuong do o mang chua ket noi)
+            self._try_map_drive(force=True)
+            if not os.path.isdir(voice_dir):
+                self._log(f"❌ Thư mục không tồn tại: {voice_dir}")
+                self._log("   (Đã thử map ổ mạng nhưng vẫn không thấy — "
+                          "kiểm tra Cài đặt nâng cao > Ổ mạng + máy chủ 192.168.88.254)")
+                return
 
         poll = int(self.config.get("poll_interval", 300))
         stable = int(self.config.get("stable_wait", 10))
