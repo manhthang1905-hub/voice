@@ -126,27 +126,41 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
         if not force else 0
     log(f"Can lien ket: {total_todo} TK (da xong tu truoc: {already_done})")
 
-    # SUC CHUA: ElevenLabs gioi han 1 master free chi join ~320 workspace.
-    # Tinh so cho con trong cua moi master -> phan bo TK, day thi chuyen master khac.
-    MASTER_CAP = 315
-    member_count = {}
+    # XAC DINH master nao CON NHAN duoc TK moi.
+    # ElevenLabs chan: 1 account free chi duoc o 1 workspace free -> master da co
+    # nhieu workspace se bi loi 'cannot_join_free_workspace' khi accept.
+    # Do bang cach: thu accept 1 invite dang cho cua moi master; neu 403 cannot_join
+    # => master do BI CHAN (khong nhan TK moi duoc nua).
+    blocked = set()
     for em, mw in masters:
         try:
-            member_count[em] = len(mw.member_workspace_ids())
+            pend = mw.pending_invites()
         except Exception:
-            member_count[em] = 0
-    room = {em: max(0, MASTER_CAP - member_count.get(em, 0)) for em in live_emails}
-    log("Suc chua master: " + " | ".join(
-        f"{e.split('@')[0]}: con {room[e]} cho ({member_count.get(e,0)}/{MASTER_CAP})"
-        for e in live_emails))
+            pend = []
+        if not pend:
+            continue
+        try:
+            ok, st = mw.accept_invite(pend[0].get("invite_code"))
+            if (not ok) and "cannot_join_free_workspace" in st:
+                blocked.add(em)
+        except Exception:
+            pass
+    open_masters = [e for e in live_emails if e not in blocked]
+    if blocked:
+        log("⚠ Master BỊ CHẶN nhận thêm (ElevenLabs: 1 free account chỉ 1 workspace): "
+            + ", ".join(b.split("@")[0] for b in blocked))
+    log("Master còn nhận TK mới: "
+        + (", ".join(e.split("@")[0] for e in open_masters) or "KHÔNG CÒN"))
 
-    def _pick_master_room():
-        """Master con nhieu cho trong nhat. -> email | None neu het cho."""
-        best, best_room = None, 0
-        for e in live_emails:
-            if room.get(e, 0) > best_room:
-                best, best_room = e, room[e]
-        return best
+    _rr_open = [0]
+
+    def _pick_open_master():
+        """Round-robin trong cac master con nhan duoc. -> email | None."""
+        if not open_masters:
+            return None
+        m = open_masters[_rr_open[0] % len(open_masters)]
+        _rr_open[0] += 1
+        return m
 
     # 4G login + rotate khi QUOTA per-IP
     p4g = None
@@ -187,37 +201,28 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
             stats["skip"] += 1
             continue
 
-        # GAN MASTER theo SUC CHUA (master day ~320 -> chuyen master con cho):
+        # GAN MASTER: doi master neu chua co / master chet / master BI CHAN.
         cleanup = []
         assigned = acc.get("master_email")
-        reassign = False
-        if not assigned:
-            reassign = True                       # chua co master
-        elif assigned not in live_emails:
-            reassign = True; cleanup = [assigned]  # master CHET -> xoa khoi ws + doi
-        elif room.get(assigned, 0) <= 0:
-            reassign = True                       # master DAY -> chuyen master con cho
-
-        if reassign:
-            newm = _pick_master_room()
+        if assigned and assigned not in live_emails:
+            cleanup = [assigned]   # master chet -> xoa khoi workspace
+        need_new = (not assigned) or (assigned not in live_emails) or (assigned in blocked)
+        if need_new:
+            newm = _pick_open_master()
             if not newm:
-                # Het cho o TAT CA master -> can them master moi
+                # Khong con master nao nhan duoc -> can them master (moi/paid)
                 stats["no_room"] += 1
                 continue
-            if cleanup or newm != assigned:
-                if assigned and newm != assigned:
-                    log(f"  CHUYEN {email}: {assigned.split('@')[0] if assigned else '-'}"
-                        f" (day) -> {newm.split('@')[0]} (con cho)")
+            if newm != assigned:
+                if assigned:
+                    log(f"  CHUYEN {email}: {assigned.split('@')[0]} (chặn/chết)"
+                        f" -> {newm.split('@')[0]}")
                 acc["master_email"] = newm
                 acc["master_onboarded"] = False
                 acc["master_ready"] = False
             assigned = newm
-            room[newm] -= 1                       # giu cho cho TK nay
-        else:
-            # giu master cu (con cho) - TK nay se chiem 1 cho khi accept
-            room[assigned] = max(0, room.get(assigned, 0) - 1)
 
-        # RESUME: da login+invite roi (va master con cho) -> bo qua, de accept xu ly.
+        # RESUME: da login+invite roi (master con nhan duoc) -> de accept xu ly, khong re-login.
         if acc.get("master_onboarded") and not force:
             stats["skip"] += 1
             continue
@@ -265,8 +270,9 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
     log(f"XONG: invited={stats['invited']} already={stats['already']} "
         f"fail={stats['fail']} dead={stats['dead']} | READY={ready} ALIVE={alive}")
     if stats["no_room"]:
-        log(f"⚠ {stats['no_room']} TK CHUA co cho (master da day ~{MASTER_CAP}/master). "
-            f"-> THEM MASTER MOI (Quan ly Master) roi 'Lien ket Master' lai.")
+        log(f"⛔ {stats['no_room']} TK chưa link được: TẤT CẢ master free đang bị "
+            f"ElevenLabs chặn ('1 free account = 1 free workspace'). "
+            f"Cần master CÒN nhận được (master mới chưa dùng, hoặc master PAID).")
     stats.update({"ready": ready, "alive": alive, "accepted": stats["invited"]})
     return stats
 
