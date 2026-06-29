@@ -353,6 +353,9 @@ class MasterWorkspace:
                 log(f"accepted {iv.get('inviting_user_email','')}")
             elif "no_more_seats" in st or "already" in st.lower():
                 stats["already"] += 1   # da la member / workspace day -> bo qua
+            elif "cannot_join_free_workspace" in st:
+                # MASTER da day (~320 workspace free) -> khong join them duoc nua
+                stats["full"] = stats.get("full", 0) + 1
             else:
                 stats["fail"] += 1
                 log(f"fail {iv.get('inviting_user_email','')}: {st}")

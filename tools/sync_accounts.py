@@ -126,6 +126,28 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
         if not force else 0
     log(f"Can lien ket: {total_todo} TK (da xong tu truoc: {already_done})")
 
+    # SUC CHUA: ElevenLabs gioi han 1 master free chi join ~320 workspace.
+    # Tinh so cho con trong cua moi master -> phan bo TK, day thi chuyen master khac.
+    MASTER_CAP = 315
+    member_count = {}
+    for em, mw in masters:
+        try:
+            member_count[em] = len(mw.member_workspace_ids())
+        except Exception:
+            member_count[em] = 0
+    room = {em: max(0, MASTER_CAP - member_count.get(em, 0)) for em in live_emails}
+    log("Suc chua master: " + " | ".join(
+        f"{e.split('@')[0]}: con {room[e]} cho ({member_count.get(e,0)}/{MASTER_CAP})"
+        for e in live_emails))
+
+    def _pick_master_room():
+        """Master con nhieu cho trong nhat. -> email | None neu het cho."""
+        best, best_room = None, 0
+        for e in live_emails:
+            if room.get(e, 0) > best_room:
+                best, best_room = e, room[e]
+        return best
+
     # 4G login + rotate khi QUOTA per-IP
     p4g = None
     if proxy is None:
@@ -145,7 +167,8 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
         except Exception:
             return None
 
-    stats = {"invited": 0, "already": 0, "fail": 0, "skip": 0, "dead": 0}
+    stats = {"invited": 0, "already": 0, "fail": 0, "skip": 0, "dead": 0,
+             "no_room": 0}
     rr = 0  # round-robin index
     processed = 0
     for acc in accounts:
@@ -159,24 +182,42 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
             stats["skip"] += 1
             continue
 
-        # GAN MASTER (chia deu round-robin), xu ly master die:
+        # Da READY (master da accept) -> xong, bo qua.
+        if acc.get("master_ready") and not force:
+            stats["skip"] += 1
+            continue
+
+        # GAN MASTER theo SUC CHUA (master day ~320 -> chuyen master con cho):
         cleanup = []
         assigned = acc.get("master_email")
+        reassign = False
         if not assigned:
-            assigned = live_emails[rr % len(live_emails)]; rr += 1
-            acc["master_email"] = assigned
+            reassign = True                       # chua co master
         elif assigned not in live_emails:
-            # master cu DA CHET -> orphan: gan master song khac + RE-LINK lai tu dau,
-            # xoa master chet khoi workspace de giai phong seat cho master moi
-            old = assigned
-            assigned = live_emails[rr % len(live_emails)]; rr += 1
-            acc["master_email"] = assigned
-            acc["master_ready"] = False
-            acc["master_onboarded"] = False
-            cleanup = [old]
-            log(f"  RE-LINK {email}: master {old} chet -> {assigned} (xoa master cu)")
-        # RESUME: account da login+invite (master_onboarded) -> BO QUA, khong lam lai.
-        # (master_onboarded luu moi 10 account -> dung/mo lai khong chay tu dau)
+            reassign = True; cleanup = [assigned]  # master CHET -> xoa khoi ws + doi
+        elif room.get(assigned, 0) <= 0:
+            reassign = True                       # master DAY -> chuyen master con cho
+
+        if reassign:
+            newm = _pick_master_room()
+            if not newm:
+                # Het cho o TAT CA master -> can them master moi
+                stats["no_room"] += 1
+                continue
+            if cleanup or newm != assigned:
+                if assigned and newm != assigned:
+                    log(f"  CHUYEN {email}: {assigned.split('@')[0] if assigned else '-'}"
+                        f" (day) -> {newm.split('@')[0]} (con cho)")
+                acc["master_email"] = newm
+                acc["master_onboarded"] = False
+                acc["master_ready"] = False
+            assigned = newm
+            room[newm] -= 1                       # giu cho cho TK nay
+        else:
+            # giu master cu (con cho) - TK nay se chiem 1 cho khi accept
+            room[assigned] = max(0, room.get(assigned, 0) - 1)
+
+        # RESUME: da login+invite roi (va master con cho) -> bo qua, de accept xu ly.
         if acc.get("master_onboarded") and not force:
             stats["skip"] += 1
             continue
@@ -223,6 +264,9 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
     _save(data)
     log(f"XONG: invited={stats['invited']} already={stats['already']} "
         f"fail={stats['fail']} dead={stats['dead']} | READY={ready} ALIVE={alive}")
+    if stats["no_room"]:
+        log(f"⚠ {stats['no_room']} TK CHUA co cho (master da day ~{MASTER_CAP}/master). "
+            f"-> THEM MASTER MOI (Quan ly Master) roi 'Lien ket Master' lai.")
     stats.update({"ready": ready, "alive": alive, "accepted": stats["invited"]})
     return stats
 
