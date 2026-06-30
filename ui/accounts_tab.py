@@ -1214,12 +1214,14 @@ class AccountsTab(QWidget):
                 "Không có TK nào có password hoặc login_refresh_token để liên kết!")
             return
 
-        not_done = [a for a in cand if not a.get("master_onboarded")]
+        # CHUA READY = master chua accept (gom ca TK da moi nhung accept chua xong).
+        not_done = [a for a in cand if not a.get("master_ready")
+                    and a.get("status") != "dead"]
         force = False
         if not not_done:
             reply = QMessageBox.question(
                 self, "Liên kết Master",
-                f"Tất cả {len(cand)} TK đã liên kết.\n"
+                f"Tất cả {len(cand)} TK đã sẵn sàng.\n"
                 f"Liên kết lại (force) toàn bộ?",
                 QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
