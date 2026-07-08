@@ -24,17 +24,21 @@ YOUTUBE_LUFS = -14.0      # Chuẩn YouTube
 TRUE_PEAK = -1.0          # True peak max
 
 
+# Thư mục ffmpeg đi kèm dự án (portable: copy đi đâu cũng tìm được, không phụ thuộc máy cũ)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _find_tool(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
     candidates = [
-        os.path.join("D:\\upload", "ffmpeg", "bin", f"{name}.exe"),
-        os.path.join("D:\\upload", "ffmpeg", "bin", name.upper() + ".EXE"),
-        os.path.join("C:\\Users\\Administrator\\Desktop\\voice\\11lab_vm", "ffmpeg", "bin", f"{name}.exe"),
-        os.path.join("C:\\Users\\Administrator\\Desktop\\voice\\11lab_vm", "ffmpeg", "bin", name.upper() + ".EXE"),
+        # ffmpeg bundled trong chính dự án (ưu tiên)
+        os.path.join(_PROJECT_ROOT, "ffmpeg", "bin", f"{name}.exe"),
+        os.path.join(_PROJECT_ROOT, "ffmpeg", "bin", name.upper() + ".EXE"),
+        os.path.join(_PROJECT_ROOT, "tools", "ffmpeg", "bin", f"{name}.exe"),
+        # fallback: các vị trí cài chung trên máy
         os.path.join("D:\\ffmpeg", "bin", f"{name}.exe"),
-        os.path.join("D:\\11lab", "tools", "ffmpeg", "bin", f"{name}.exe"),
     ]
     for path in candidates:
         if os.path.exists(path):

@@ -324,18 +324,18 @@ class BrowserConvert:
             audio_parts.append(audio)
             time.sleep(3)
 
-        # Ghép
+        # Ghép -> ghi thang ra mp3_path.
+        # (merge_audio_bytes YEU CAU output_file va TRA VE duong dan, khong tra bytes)
+        mp3_path = os.path.join(output_dir, f"{base_name}.mp3")
         if len(audio_parts) == 1:
-            final = audio_parts[0]
+            with open(mp3_path, 'wb') as f:
+                f.write(audio_parts[0])
         else:
             from core.audio_merger import merge_audio_bytes
-            final = merge_audio_bytes(audio_parts, silence_between_ms=500)
+            merge_audio_bytes(audio_parts, mp3_path, silence_between_ms=500)
 
-        mp3_path = os.path.join(output_dir, f"{base_name}.mp3")
-        with open(mp3_path, 'wb') as f:
-            f.write(final)
-
-        log.info(f"BrowserConvert: XONG {mp3_path} ({len(final)/1024/1024:.1f} MB)")
+        log.info(f"BrowserConvert: XONG {mp3_path} "
+                 f"({os.path.getsize(mp3_path)/1024/1024:.1f} MB)")
         return mp3_path
 
     # ============================================================

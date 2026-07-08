@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QAbstractItemView, QMessageBox, QComboBox, QGroupBox,
-    QFileDialog, QInputDialog, QDialog,
+    QFileDialog, QInputDialog, QDialog, QTextEdit, QCheckBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
@@ -214,6 +214,154 @@ class ReopenMasterWorker(QThread):
             self.done.emit(False, f"loi: {str(e)[:100]}")
 
 
+class AutoRecoverWorker(QThread):
+    """TU DONG login lai cac master 'expired' co credential trong gmail.txt."""
+    log = pyqtSignal(str)
+    done = pyqtSignal(dict)   # {"recovered":[...], "skipped":[...], "failed":[...]}
+
+    def __init__(self, only_email=None):
+        super().__init__()
+        self.only_email = only_email
+        self._stop = False
+
+    def cancel(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            from core.master_login import auto_login_master, recover_expired_masters
+            from core.masters_store import add_master
+            if self.only_email:
+                # Login lai DUNG 1 master (du dang active hay expired)
+                email, rt = auto_login_master(
+                    self.only_email,
+                    on_log=lambda m: self.log.emit(m),
+                    should_stop=lambda: self._stop)
+                if rt:
+                    add_master(email or self.only_email, rt)
+                    self.done.emit({"recovered": [self.only_email],
+                                    "skipped": [], "failed": []})
+                else:
+                    self.done.emit({"recovered": [], "skipped": [],
+                                    "failed": [(self.only_email, str(email))]})
+                return
+            res = recover_expired_masters(
+                on_log=lambda m: self.log.emit(m),
+                should_stop=lambda: self._stop)
+            self.done.emit(res)
+        except Exception as e:
+            self.done.emit({"recovered": [], "skipped": [],
+                            "failed": [("?", str(e)[:80])]})
+
+
+class BulkMasterWorker(QThread):
+    """Nhap NHIEU master 1 lan: luu creds -> auto login lay token -> bat active."""
+    log = pyqtSignal(str)
+    done = pyqtSignal(dict)
+
+    def __init__(self, text, auto_login=True):
+        super().__init__()
+        self.text = text
+        self.auto_login = auto_login
+        self._stop = False
+
+    def cancel(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            from core.master_login import add_masters_bulk
+            res = add_masters_bulk(
+                self.text, auto_login=self.auto_login,
+                on_log=lambda m: self.log.emit(m),
+                should_stop=lambda: self._stop)
+            self.done.emit(res)
+        except Exception as e:
+            self.done.emit({"added": [], "logged_in": [], "need_login": [],
+                            "failed": [("?", str(e)[:100])]})
+
+
+class MasterBulkInputDialog(QDialog):
+    """Cho dan nhieu master (email|password|totp), moi dong 1 TK -> nhap 1 luot."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nhập nhiều master")
+        self.resize(560, 420)
+        self.worker = None
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(
+            "Dán danh sách master, mỗi dòng: <b>email|password|totp</b>\n"
+            "(TOTP = mã 2FA secret). Tool sẽ lưu và tự đăng nhập lấy token."))
+        self.edit = QTextEdit()
+        self.edit.setPlaceholderText(
+            "vd:\nabc@gmail.com|matkhau|totpsecret\nxyz@gmail.com|matkhau|totpsecret")
+        self.edit.setStyleSheet("font-family:Consolas,monospace; font-size:12px;")
+        v.addWidget(self.edit, 1)
+        self.chk_login = QCheckBox("Tự đăng nhập ngay để lấy token (mở Chrome)")
+        self.chk_login.setChecked(True)
+        v.addWidget(self.chk_login)
+        self.lbl = QLabel("")
+        self.lbl.setStyleSheet("color:#666; font-size:11px;")
+        self.lbl.setWordWrap(True)
+        v.addWidget(self.lbl)
+        row = QHBoxLayout()
+        self.btn_ok = QPushButton("➕ Nhập")
+        self.btn_ok.setStyleSheet(
+            "font-weight:bold; background:#27ae60; color:white; padding:6px 14px;")
+        self.btn_ok.clicked.connect(self._submit)
+        row.addWidget(self.btn_ok)
+        row.addStretch(1)
+        btn_close = QPushButton("Đóng")
+        btn_close.clicked.connect(self.reject)
+        row.addWidget(btn_close)
+        v.addLayout(row)
+
+    def _submit(self):
+        if self.worker and self.worker.isRunning():
+            return
+        from core.master_login import parse_master_creds_text
+        rows = parse_master_creds_text(self.edit.toPlainText())
+        if not rows:
+            QMessageBox.warning(self, "Nhập master",
+                                "Chưa có dòng hợp lệ (email|password|totp).")
+            return
+        self.btn_ok.setEnabled(False)
+        self.lbl.setText(f"Đang xử lý {len(rows)} master...")
+        self.worker = BulkMasterWorker(
+            self.edit.toPlainText(), auto_login=self.chk_login.isChecked())
+        self.worker.log.connect(lambda m: self.lbl.setText(m))
+        self.worker.done.connect(self._on_done)
+        self.worker.start()
+
+    def _on_done(self, res):
+        self.btn_ok.setEnabled(True)
+        added = res.get("added", [])
+        li = res.get("logged_in", [])
+        need = res.get("need_login", [])
+        fail = res.get("failed", [])
+        parts = [f"Đã nhập {len(added)} master."]
+        if li:
+            parts.append(f"✅ Đăng nhập được ({len(li)}): {', '.join(li)}")
+        if need:
+            parts.append(f"⏳ Chưa lấy được token ({len(need)}) — bấm "
+                         f"'🔧 Tự động login lại' sau: {', '.join(need)}")
+        if fail:
+            parts.append("❌ Lỗi: " + ", ".join(str(e) for e, _ in fail))
+        if li:
+            parts.append("\n➡ Giờ bấm '🔗 Liên kết Master' để chuyển các TK từ "
+                         "master chết sang master mới (tool tự re-link).")
+        summary = "\n".join(parts)
+        self.lbl.setText(summary.replace("\n", " | "))
+        try:
+            from core.master_pool import reset_shared_pool
+            reset_shared_pool()   # co master moi -> pool nap lai
+        except Exception:
+            pass
+        QMessageBox.information(self, "Nhập master", summary)
+        self.accept()
+
+
 class MasterManagerDialog(QDialog):
     """Bang quan ly master: xem danh sach, trang thai song/chet, so TK, bat/tat, xoa."""
 
@@ -224,6 +372,7 @@ class MasterManagerDialog(QDialog):
         self.add_worker = None
         self.check_worker = None
         self.reopen_worker = None
+        self.recover_worker = None
         self._alive = {}    # email -> True/False sau khi kiem tra
         self._build()
         self._reload()
@@ -258,9 +407,24 @@ class MasterManagerDialog(QDialog):
         self.btn_add.clicked.connect(self._add_master)
         row.addWidget(self.btn_add)
 
+        self.btn_bulk = QPushButton("📋 Nhập nhiều master")
+        self.btn_bulk.setToolTip(
+            "Dan nhieu master (email|password|totp) 1 luot -> tool tu login lay token.")
+        self.btn_bulk.setStyleSheet("background:#2980b9; color:white; padding:6px 12px;")
+        self.btn_bulk.clicked.connect(self._bulk_master)
+        row.addWidget(self.btn_bulk)
+
         self.btn_check = QPushButton("🔄 Kiểm tra sống/chết")
         self.btn_check.clicked.connect(self._check_alive)
         row.addWidget(self.btn_check)
+
+        self.btn_recover = QPushButton("🔧 Tự động login lại (hết hạn)")
+        self.btn_recover.setToolTip(
+            "Tu dong dang nhap lai cac master HET HAN co credential\n"
+            "(them dong 'email|password|totp' vao config/gmail.txt).")
+        self.btn_recover.setStyleSheet("background:#e67e22; color:white; padding:6px 10px;")
+        self.btn_recover.clicked.connect(self._auto_recover)
+        row.addWidget(self.btn_recover)
 
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color:#666; font-size:11px;")
@@ -288,6 +452,8 @@ class MasterManagerDialog(QDialog):
             if email in self._alive:
                 txt = "🟢 SỐNG" if self._alive[email] else "🔴 CHẾT"
                 color = "#27ae60" if self._alive[email] else "#e74c3c"
+            elif status == "expired":
+                txt, color = "🔑 HẾT HẠN", "#e67e22"
             elif status == "disabled":
                 txt, color = "⏸ TẮT", "#95a5a6"
             else:
@@ -330,13 +496,60 @@ class MasterManagerDialog(QDialog):
         self.lbl.setText(f"{len(masters)} master")
 
     def closeEvent(self, e):
-        for w in (self.reopen_worker, self.check_worker, self.add_worker):
+        for w in (self.reopen_worker, self.check_worker, self.add_worker,
+                  self.recover_worker):
             try:
                 if w and w.isRunning():
                     w.cancel() if hasattr(w, "cancel") else None
             except Exception:
                 pass
         super().closeEvent(e)
+
+    def _auto_recover(self):
+        if self.recover_worker and self.recover_worker.isRunning():
+            return
+        from core.masters_store import list_masters
+        expired = [m.get("email") for m in list_masters()
+                   if (m.get("status") or "active") == "expired"]
+        if not expired:
+            QMessageBox.information(
+                self, "Tự động login lại",
+                "Không có master nào ở trạng thái HẾT HẠN.")
+            return
+        QMessageBox.information(
+            self, "Tự động login lại",
+            "Tool sẽ tự mở Chrome đăng nhập lại các master hết hạn "
+            f"({len(expired)}) bằng credential trong config/gmail.txt "
+            "(dòng 'email|password|totp').\n\nChrome tự đóng khi xong.")
+        self.btn_recover.setEnabled(False)
+        self.lbl.setText("Đang tự động login lại master hết hạn...")
+        self.recover_worker = AutoRecoverWorker()
+        self.recover_worker.log.connect(lambda m: self.lbl.setText(m))
+        self.recover_worker.done.connect(self._on_recover_done)
+        self.recover_worker.start()
+
+    def _on_recover_done(self, res):
+        self.btn_recover.setEnabled(True)
+        rec = res.get("recovered", [])
+        skip = res.get("skipped", [])
+        fail = res.get("failed", [])
+        parts = []
+        if rec:
+            parts.append(f"✅ Khôi phục: {', '.join(rec)}")
+        if skip:
+            parts.append(f"⏭ Thiếu credential (thêm vào gmail.txt): {', '.join(skip)}")
+        if fail:
+            parts.append("❌ Lỗi: " + ", ".join(f"{e}" for e, _ in fail))
+        summary = "\n".join(parts) or "Không có gì để làm."
+        self.lbl.setText(summary.replace("\n", " | "))
+        try:
+            from core.master_pool import reset_shared_pool
+            reset_shared_pool()   # master vua khoi phuc -> pool nap lai
+        except Exception:
+            pass
+        QMessageBox.information(self, "Tự động login lại", summary)
+        self._alive.clear()
+        self._reload()
 
     def _reopen(self, email, refresh_token):
         if self.reopen_worker and self.reopen_worker.isRunning():
@@ -352,7 +565,13 @@ class MasterManagerDialog(QDialog):
     def _on_reopen_done(self, ok, msg):
         self.lbl.setText(msg)
         if not ok:
-            QMessageBox.warning(self, "Mở lại", "❌ " + msg)
+            hint = ""
+            if any(k in str(msg).lower() for k in ("chet", "chết", "expired",
+                                                   "token_expired", "refresh")):
+                hint = ("\n\n➡ Master này HẾT HẠN refresh token. Bấm "
+                        "'🔧 Tự động login lại (hết hạn)' để tool tự đăng nhập lại "
+                        "(cần dòng 'email|password|totp' trong config/gmail.txt).")
+            QMessageBox.warning(self, "Mở lại", "❌ " + msg + hint)
         self._reload()
 
     def _toggle(self, email, status):
@@ -372,6 +591,12 @@ class MasterManagerDialog(QDialog):
         from core.masters_store import remove_master
         remove_master(email)
         self._alive.pop(email, None)
+        self._reload()
+
+    def _bulk_master(self):
+        dlg = MasterBulkInputDialog(self)
+        dlg.exec_()
+        self._alive.clear()
         self._reload()
 
     def _add_master(self):
@@ -480,17 +705,18 @@ class QuickCheckWorker(QThread):
             email = acc["email"]
             api_key = acc.get("api_key", "")
             if not api_key:
-                return email, "error", 0
+                return email, "error", 0, 0
             try:
                 q = check_quota(api_key, proxy=None)
                 if q is None:
-                    return email, "error", -1
+                    return email, "error", -1, 0
                 remaining = q["chars_remaining"]
+                reset = q.get("next_reset_unix", 0)   # LUU ngay reset -> auto-reset chay
                 if remaining <= 0:
-                    return email, "exhausted", 0
-                return email, "alive", remaining
+                    return email, "exhausted", 0, reset
+                return email, "alive", remaining, reset
             except Exception:
-                return email, "error", -1
+                return email, "error", -1, 0
 
         checked = 0
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -499,15 +725,15 @@ class QuickCheckWorker(QThread):
             for f in as_completed(futures):
                 if self._cancelled:
                     break
-                email, status, remaining = f.result()
+                email, status, remaining, reset = f.result()
                 checked += 1
                 if status == "alive":
                     stats["alive"] += 1
                     stats["total_chars"] += remaining
-                    set_remaining(email, remaining)
+                    set_remaining(email, remaining, reset)
                 elif status == "exhausted":
                     stats["exhausted"] += 1
-                    set_remaining(email, 0)
+                    set_remaining(email, 0, reset)
                 else:
                     stats["error"] += 1
                 self.progress.emit(checked, total, email,
@@ -1190,6 +1416,14 @@ class AccountsTab(QWidget):
             f"Exhausted: {stats['exhausted']} | "
             f"Error: {stats['error']}")
         self._load_data()
+        # BAO CAO QUOTA TOAN DOI (con bao nhieu, reset ngay nao, budget/ngay)
+        try:
+            from core.quota_report import fleet_report, format_report
+            rep = fleet_report()
+            QMessageBox.information(self, "📊 Báo cáo Quota toàn đội",
+                                    format_report(rep))
+        except Exception:
+            pass
 
     # === QUAN LY MASTER (them / xem / xoa / mo lai) ===
 

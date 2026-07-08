@@ -33,8 +33,22 @@ except Exception:
     def detect_language_from_files(files, **kw):
         return ""
 
-# Path mặc định trên VM
-DEFAULT_VOICE_DIR = r"C:\Users\Administrator\Desktop\voice\voice"
+# Path mặc định: đọc động từ settings.json ("output_dir") -> đổi ở tab/cấu hình,
+# không hardcode theo máy cũ. Fallback về D:\AUTO\voice nếu chưa cấu hình.
+def _default_voice_dir():
+    try:
+        d = (Config().get("output_dir") or "").strip()
+        if d:
+            return d
+    except Exception:
+        pass
+    return r"D:\AUTO\voice"
+
+DEFAULT_VOICE_DIR = _default_voice_dir()
+
+# Quy doi ky tu -> gio voice (uoc tinh tu do do thuc te: ~15-19 ky tu/giay tuy
+# ngon ngu/model -> lay TB ~16/giay = 57.600/gio). Chi de hien thi tuong doi.
+CHARS_PER_HOUR = 57600
 
 # Regex extract code: KA5-0001, SB1-0002, AR1-0003
 CODE_REGEX = re.compile(r"([A-Za-z0-9]+-\d{4})")
@@ -60,11 +74,19 @@ def extract_code(text):
 
 
 def file_stable(path, wait=10):
-    """Check file không thay đổi trong `wait` giây."""
+    """Check file không thay đổi trong `wait` giây.
+
+    Toi uu: neu file da LAU khong doi (mtime cach day >= wait giay) thi chac chan
+    on dinh roi -> tra True NGAY, khoi cho 10s. Chi cho + recheck voi file vua ghi.
+    (Truoc day file nao cung sleep(wait) -> quet 48 file mat ~8 phut vo ich.)
+    """
     try:
-        size1 = os.path.getsize(path)
-        if size1 == 0:
+        st = os.stat(path)
+        if st.st_size == 0:
             return False
+        if time.time() - st.st_mtime >= wait:
+            return True
+        size1 = st.st_size
         time.sleep(wait)
         size2 = os.path.getsize(path)
         return size1 == size2
@@ -361,6 +383,16 @@ class AutoSettingsDialog(QDialog):
 
         form = QFormLayout()
 
+        # Thu muc voice (chuyen tu tab chinh vao day)
+        dir_row = QHBoxLayout()
+        self.ed_voice_dir = QLineEdit(str(c.get("output_dir", "") or ""))
+        dir_row.addWidget(self.ed_voice_dir, 1)
+        btn_vd = QPushButton("Chọn")
+        btn_vd.setFixedWidth(50)
+        btn_vd.clicked.connect(self._browse_voice_dir)
+        dir_row.addWidget(btn_vd)
+        form.addRow("Thư mục voice:", dir_row)
+
         self.cb_model = QComboBox()
         self.cb_model.addItems(self.MODELS)
         cur = c.get("default_model", "eleven_v3")
@@ -420,6 +452,39 @@ class AutoSettingsDialog(QDialog):
         self.chk_srt.setChecked(bool(c.get("auto_create_srt", True)))
         form.addRow("", self.chk_srt)
 
+        self.chk_parallel = QCheckBox("⚡ Chạy SONG SONG các chunk (nhanh ~3x)")
+        self.chk_parallel.setToolTip(
+            "Generate nhiều chunk cùng lúc thay vì tuần tự -> nhanh hơn nhiều với file dài.\n"
+            "Chỉ áp dụng master mode. Chunk nào lỗi sẽ tự làm lại tuần tự (an toàn).")
+        self.chk_parallel.setChecked(bool(c.get("parallel_chunks", True)))
+        form.addRow("", self.chk_parallel)
+
+        self.sp_pworkers = QSpinBox()
+        self.sp_pworkers.setRange(2, 6)
+        self.sp_pworkers.setValue(int(c.get("parallel_chunk_workers", 3)))
+        self.sp_pworkers.setToolTip("Số chunk generate cùng lúc (2-6).")
+        form.addRow("  Số chunk song song:", self.sp_pworkers)
+
+        self.chk_maint = QCheckBox("🤖 Tự bảo trì nền (quét quota + reset + cảnh báo)")
+        self.chk_maint.setToolTip(
+            "Tool 24/7: định kỳ quét quota thật, lưu ngày reset, cảnh báo cạn nguồn.\n"
+            "Chạy khi KHÔNG convert. Đọc-only, không tốn credit.")
+        self.chk_maint.setChecked(bool(c.get("auto_maintenance", True)))
+        form.addRow("", self.chk_maint)
+
+        self.sp_maint_h = QSpinBox()
+        self.sp_maint_h.setRange(1, 48)
+        self.sp_maint_h.setValue(int(c.get("maintenance_interval_hours", 12)))
+        self.sp_maint_h.setToolTip("Bao lâu bảo trì 1 lần (giờ).")
+        form.addRow("  Chu kỳ bảo trì (giờ):", self.sp_maint_h)
+
+        self.chk_relink = QCheckBox("Tự Liên kết Master khi bảo trì (nặng)")
+        self.chk_relink.setToolTip(
+            "Khi bảo trì, tự gom TK pending/mồ côi về master sống.\n"
+            "NẶNG (login nhiều worker qua 4G) -> chỉ bật nếu muốn hoàn toàn tự động.")
+        self.chk_relink.setChecked(bool(c.get("auto_relink", False)))
+        form.addRow("", self.chk_relink)
+
         self.ed_sheet = QLineEdit(str(c.get("sheet_name", "KA")))
         self.ed_sheet.setToolTip(
             "Tên Google Sheet đọc voice/folder (tab THÔNG TIN + INPUT).\n"
@@ -459,8 +524,17 @@ class AutoSettingsDialog(QDialog):
         row.addWidget(btn_cancel)
         v.addLayout(row)
 
+    def _browse_voice_dir(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "Chọn thư mục voice", self.ed_voice_dir.text().strip())
+        if d:
+            self.ed_voice_dir.setText(d)
+
     def _save(self):
         c = self.config
+        _vd = self.ed_voice_dir.text().strip()
+        if _vd:
+            c.set("output_dir", _vd)
         c.set("default_model", self.cb_model.currentText())
         c.set("voice_stability", round(self.sp_stab.value(), 2))
         c.set("voice_similarity_boost", round(self.sp_sim.value(), 2))
@@ -470,6 +544,11 @@ class AutoSettingsDialog(QDialog):
         c.set("max_retries", self.sp_retry.value())
         c.set("max_threads", self.sp_threads.value())
         c.set("auto_create_srt", self.chk_srt.isChecked())
+        c.set("parallel_chunks", self.chk_parallel.isChecked())
+        c.set("parallel_chunk_workers", self.sp_pworkers.value())
+        c.set("auto_maintenance", self.chk_maint.isChecked())
+        c.set("maintenance_interval_hours", self.sp_maint_h.value())
+        c.set("auto_relink", self.chk_relink.isChecked())
         c.set("poll_interval", self.sp_poll.value())
         c.set("stable_wait", self.sp_stable.value())
         sheet = self.ed_sheet.text().strip()
@@ -529,7 +608,12 @@ class AutoTab(QWidget):
     def _open_advanced_settings(self):
         dlg = AutoSettingsDialog(self.config, self)
         if dlg.exec_():
+            # Voice dir co the vua doi trong dialog -> dong bo lai
+            vd = (self.config.get("output_dir") or "").strip()
+            if vd:
+                self.dir_input.setText(vd)
             self._update_cfg_label()
+            self._update_overview()
 
     def _try_map_drive(self, force=False):
         """Map o mang (net use) neu bat trong cai dat. -> True neu chay/OK."""
@@ -551,49 +635,76 @@ class AutoTab(QWidget):
         layout.setContentsMargins(8, 8, 8, 6)
         layout.setSpacing(6)
 
-        # === ROW 1: Cài đặt ===
-        row1 = QHBoxLayout()
+        # === TONG QUAN (ngay duoi tabs): bao cao SAN XUAT + TAI NGUYEN ===
+        ov = QGroupBox("📊 Tổng quan")
+        ov.setStyleSheet("QGroupBox{font-weight:bold; font-size:11px;}")
+        ovl = QHBoxLayout(ov)
+        ovl.setContentsMargins(12, 14, 12, 8)
+        ovl.setSpacing(16)
 
-        # Thư mục
-        g1 = QGroupBox("Thư mục")
-        g1l = QGridLayout(g1)
-        g1l.setContentsMargins(6, 18, 6, 6)
+        def _stat(title, tip="", big=False):
+            box = QVBoxLayout()
+            box.setSpacing(0)
+            val = QLabel("—")
+            val.setStyleSheet(
+                "font-size:%dpx; font-weight:bold;" % (18 if big else 15))
+            cap = QLabel(title)
+            cap.setStyleSheet("font-size:9px; color:#888;")
+            if tip:
+                val.setToolTip(tip)
+                cap.setToolTip(tip)
+            box.addWidget(val)
+            box.addWidget(cap)
+            ovl.addLayout(box)
+            return val
 
-        g1l.addWidget(QLabel("Voice dir:"), 0, 0)
-        self.dir_input = QLineEdit(DEFAULT_VOICE_DIR)
-        g1l.addWidget(self.dir_input, 0, 1)
-        btn_browse = QPushButton("Chọn")
-        btn_browse.setFixedWidth(50)
-        btn_browse.clicked.connect(self._browse_dir)
-        g1l.addWidget(btn_browse, 0, 2)
+        def _sep(text="│"):
+            s = QLabel(text)
+            s.setStyleSheet("color:#ccc; font-size:16px;")
+            ovl.addWidget(s)
 
-        row1.addWidget(g1, 2)
-
-        # Cài đặt (gọn: chỉ nút nâng cao + tóm tắt chỉ số hiện tại)
-        g2 = QGroupBox("Cài đặt")
-        g2v = QVBoxLayout(g2)
-        g2v.setContentsMargins(8, 18, 8, 8)
-        g2v.setSpacing(6)
-
+        # --- SAN XUAT (voice thuc te tren dia) ---
+        self.ov_today = _stat("Xử lý hôm nay", "Số file voice đã tạo xong HÔM NAY", big=True)
+        self.ov_pending = _stat("Còn tồn", "File chưa xử lý (TXT chưa có MP3)", big=True)
+        self.ov_donetotal = _stat("Tổng đã làm", "Tổng file đã có MP3 (mọi thời điểm)")
+        _sep()
+        # --- TAI NGUYEN ---
+        self.ov_capacity = _stat("Quota tạo được", "Số giờ voice có thể tạo từ quota còn lại của 1500 TK")
+        self.ov_alive = _stat("TK sống", "Số TK còn quota")
+        self.ov_master = _stat("Master")
+        self.ov_runway = _stat("Còn ~ngày", "Quota còn ÷ mức dùng hôm nay")
+        ovl.addStretch(1)
+        self.btn_refresh_ov = QPushButton("↻")
+        self.btn_refresh_ov.setFixedWidth(28)
+        self.btn_refresh_ov.setToolTip("Cập nhật tổng quan (đọc file/roster, không tốn credit).")
+        self.btn_refresh_ov.clicked.connect(self._update_overview)
+        ovl.addWidget(self.btn_refresh_ov)
+        # Nut Cai dat nang cao NGAY tren dong Tong quan
         self.btn_adv = QPushButton("⚙ Cài đặt nâng cao")
         self.btn_adv.setToolTip(
-            "Chỉnh model, stability, similarity, chunk, số luồng, "
-            "auto-start, chu kỳ quét, ổn định file...")
+            "Thư mục voice, model, stability, chunk, song song, tự bảo trì...")
         self.btn_adv.setStyleSheet(
             "font-weight:bold; background:#34495e; color:white; "
-            "padding:7px; border-radius:4px;")
+            "padding:6px 12px; border-radius:4px;")
         self.btn_adv.clicked.connect(self._open_advanced_settings)
-        g2v.addWidget(self.btn_adv)
+        ovl.addWidget(self.btn_adv)
+        layout.addWidget(ov)
 
-        # tom tat chi so hien tai (de biet ngay dang dung gi)
+        self._ov_timer = QTimer(self)
+        self._ov_timer.timeout.connect(self._update_overview)
+        self._ov_timer.start(60000)
+        QTimer.singleShot(1500, self._update_overview)
+
+        # Voice dir: KHONG hien o day nua -> chinh trong 'Cai dat nang cao'.
+        # Giu QLineEdit an lam noi luu gia tri (code khac doc self.dir_input.text()).
+        self.dir_input = QLineEdit(DEFAULT_VOICE_DIR, self)
+        self.dir_input.setVisible(False)
+
+        # Tom tat cau hinh hien tai (dong mong ngay duoi Tong quan)
         self.lbl_cfg = QLabel("")
-        self.lbl_cfg.setWordWrap(True)
         self.lbl_cfg.setStyleSheet("color:#888; font-size:10px;")
-        g2v.addWidget(self.lbl_cfg)
+        layout.addWidget(self.lbl_cfg)
         self._update_cfg_label()
-
-        row1.addWidget(g2, 1)
-        layout.addLayout(row1)
 
         # === ROW 2: Actions ===
         actions = QHBoxLayout()
@@ -839,9 +950,25 @@ class AutoTab(QWidget):
 
     def _log(self, msg):
         ts = time.strftime("%H:%M:%S")
-        self.log_area.append(f"[{ts}] {msg}")
+        line = f"[{ts}] {msg}"
+        self.log_area.append(line)
         sb = self.log_area.verticalScrollBar()
         sb.setValue(sb.maximum())
+        # Ghi ra FILE de xem lai / debug (logs/auto_convert.log, xoay vong khi >5MB)
+        try:
+            logdir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+            os.makedirs(logdir, exist_ok=True)
+            fpath = os.path.join(logdir, "auto_convert.log")
+            if os.path.exists(fpath) and os.path.getsize(fpath) > 5 * 1024 * 1024:
+                try:
+                    os.replace(fpath, fpath + ".old")
+                except Exception:
+                    pass
+            with open(fpath, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        except Exception:
+            pass
 
     def _on_sheet_loaded(self, n_voice, n_folder):
         self.lbl_sheet.setText(
@@ -849,20 +976,132 @@ class AutoTab(QWidget):
 
     def _on_channel_update(self, channels):
         self.ch_table.setRowCount(len(channels))
+        pend_total = 0
         for i, (folder, voice_id, pending, done) in enumerate(channels):
+            pend_total += len(pending)
             self.ch_table.setItem(i, 0, QTableWidgetItem(folder))
             self.ch_table.setItem(
                 i, 1, QTableWidgetItem(voice_id[:16] + "..."))
-            
+
             pending_item = QTableWidgetItem(str(len(pending)))
             if pending:
                 pending_item.setForeground(QColor("#e67e22"))
                 pending_item.setFont(QFont("", -1, QFont.Bold))
             self.ch_table.setItem(i, 2, pending_item)
-            
+
             done_item = QTableWidgetItem(str(done))
             done_item.setForeground(QColor("#27ae60"))
             self.ch_table.setItem(i, 3, done_item)
+        self._pending_files = pend_total
+        self._update_overview()
+
+    def _fmt_hours(self, chars):
+        """Quy doi ky tu -> gio voice (uoc tinh ~CHARS_PER_HOUR). -> '12.3h' / '45m'."""
+        h = (int(chars or 0)) / CHARS_PER_HOUR
+        if h >= 1:
+            return f"{h:.1f}h"
+        return f"{int(h*60)}m"
+
+    def _scan_production(self, root):
+        """Quet thu muc voice -> dict {done_files, pend_files, today_files,
+        done_chars, pend_chars, today_chars}.
+
+        Tinh theo MA (stem) tren TOAN CAY: 1 ma co MP3 o bat ky dau = DA LAM
+        (txt goc da chia vao folder kenh -> mp3 o kenh van tinh la xong, khong bi
+        dem nham "con ton"). Ma co txt ma KHONG co mp3 = con ton. Bo qua SRT_/.chunks.
+        """
+        r = {"done_files": 0, "pend_files": 0, "today_files": 0,
+             "done_chars": 0, "pend_chars": 0, "today_chars": 0}
+        if not root or not os.path.isdir(root):
+            return r
+        lt = time.localtime()
+        today_start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                                   0, 0, 0, 0, 0, -1))
+        txt_chars = {}     # stem -> so ky tu
+        mp3_mtime = {}     # stem -> mtime moi nhat cua mp3
+        for dirpath, dirnames, filenames in os.walk(root):
+            base = os.path.basename(dirpath)
+            if base == ".chunks" or base.startswith("SRT_"):
+                dirnames[:] = []
+                continue
+            for fn in filenames:
+                low = fn.lower()
+                stem = fn[:-4]
+                if low.endswith(".mp3"):
+                    try:
+                        mt = os.path.getmtime(os.path.join(dirpath, fn))
+                    except OSError:
+                        mt = 0
+                    if mt >= mp3_mtime.get(stem, 0):
+                        mp3_mtime[stem] = mt
+                elif low.endswith(".txt") and stem not in txt_chars:
+                    try:
+                        with open(os.path.join(dirpath, fn), "r",
+                                  encoding="utf-8", errors="ignore") as _tf:
+                            txt_chars[stem] = len(_tf.read())
+                    except OSError:
+                        txt_chars[stem] = 0
+
+        for stem, chars in txt_chars.items():
+            if stem in mp3_mtime:
+                r["done_files"] += 1
+                r["done_chars"] += chars
+                if mp3_mtime[stem] >= today_start:
+                    r["today_files"] += 1
+                    r["today_chars"] += chars
+            else:
+                r["pend_files"] += 1
+                r["pend_chars"] += chars
+        return r
+
+    def _update_overview(self):
+        """Cap nhat bang tong quan: SAN XUAT (gio voice/file) + TAI NGUYEN. Khong goi API."""
+        try:
+            from core.quota_report import fleet_report
+            from core.maintenance import todays_usage_chars
+            from core.masters_store import count_active
+
+            # --- SAN XUAT (voice thuc te tren dia) ---
+            root = self.dir_input.text().strip() if hasattr(self, "dir_input") else ""
+            p = self._scan_production(root)
+            pf = p["pend_files"]
+            self._pending_files = pf
+            self.ov_today.setText(f"{p['today_files']} file")
+            self.ov_today.setToolTip(
+                f"Hôm nay đã xử lý {p['today_files']} file (~{self._fmt_hours(p['today_chars'])})")
+            self.ov_pending.setText(f"{pf} file")
+            self.ov_pending.setToolTip(
+                f"Còn tồn {pf} file chưa xử lý (~{self._fmt_hours(p['pend_chars'])})")
+            self.ov_pending.setStyleSheet(
+                "font-size:18px; font-weight:bold; color:%s;"
+                % ("#e67e22" if pf > 0 else "#27ae60"))
+            self.ov_donetotal.setText(f"{p['done_files']} file")
+
+            # --- TAI NGUYEN ---
+            rep = fleet_report()
+            remaining = rep.get("total_remaining", 0)
+            used = todays_usage_chars()
+            masters = count_active()
+            self.ov_capacity.setText(self._fmt_hours(remaining))
+            self.ov_alive.setText(str(rep.get("alive_now", 0)))
+            self.ov_master.setText(str(masters))
+            self.ov_capacity.setStyleSheet(
+                "font-size:15px; font-weight:bold; color:%s;"
+                % ("#e74c3c" if remaining < 500_000 else
+                   ("#e67e22" if remaining < 2_000_000 else "#27ae60")))
+            self.ov_master.setStyleSheet(
+                "font-size:15px; font-weight:bold; color:%s;"
+                % ("#e74c3c" if masters < 2 else "#27ae60"))
+            if used > 0:
+                days = remaining / used
+                self.ov_runway.setText(f"{days:.1f}")
+                rc = "#e74c3c" if days < 1.5 else ("#e67e22" if days < 3 else "#27ae60")
+            else:
+                self.ov_runway.setText("∞")
+                rc = "#27ae60"
+            self.ov_runway.setStyleSheet(f"font-size:15px; font-weight:bold; color:{rc};")
+        except Exception:
+            pass
 
     def _on_scan_done(self):
         self.lbl_status.setText("🔄 Đang chạy...")

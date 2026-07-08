@@ -116,8 +116,11 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
     live_emails = [e for e, _ in masters]
     log(f"{len(masters)} master song: {live_emails} | {len(accounts)} account")
 
-    # CAN LIEN KET = TK chua READY (master CHUA accept). master_onboarded (da moi)
-    # van phai xu ly vi accept co the chua xong -> dem theo master_ready moi dung.
+    live_set = set(live_emails)
+
+    # CAN LIEN KET = TK chua READY, HOAC ready nhung master DA CHET (khong dung duoc).
+    # (Truoc day chi check master_ready -> 300+ TK "ready" tren master chet bi bo qua
+    #  vinh vien -> ket cung. Gio coi master-chet la can re-link.)
     def _is_candidate(acc):
         em = (acc.get("email") or "").strip()
         has = ((acc.get("password") or "").strip()
@@ -126,19 +129,35 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
             return False
         if acc.get("status") == "dead" and not force:
             return False
-        if acc.get("master_ready") and not force:
-            return False           # master DA accept -> dung duoc roi
+        me = acc.get("master_email")
+        master_dead = bool(me) and me not in live_set
+        if acc.get("master_ready") and not master_dead and not force:
+            return False           # ready + master SONG -> dung duoc roi
         return True
     total_todo = sum(1 for a in accounts if _is_candidate(a))
     already_ready = sum(1 for a in accounts if a.get("master_ready"))
     log(f"Can lien ket: {total_todo} TK (da READY tu truoc: {already_ready})")
 
-    _rr = [0]
+    # ===== CHIA THEO SUC CHUA (thay round-robin mu) =====
+    # Moi master free chua ~320 workspace. Gan account vao master CON CHO NHIEU NHAT
+    # (fill master rong/moi truoc) -> khong dồn vao master da day (phi). CAP de margin.
+    CAP = 300
+    load = {e: 0 for e in live_emails}
+    for a in accounts:
+        me = a.get("master_email")
+        if me in load and a.get("master_ready"):
+            load[me] += 1
+    log(f"  Tai hien tai moi master: "
+        + ", ".join(f"{e.split('@')[0]}={load[e]}" for e in live_emails))
 
     def _pick_live_master():
-        m = live_emails[_rr[0] % len(live_emails)]
-        _rr[0] += 1
-        return m
+        cand = [e for e in live_emails if load[e] < CAP] or list(live_emails)
+        e = min(cand, key=lambda x: load[x])   # master it tai nhat -> can bang
+        load[e] += 1
+        return e
+
+    def _is_full(me):
+        return me in load and load[me] >= CAP
 
     # 4G login + rotate khi QUOTA per-IP
     p4g = None
@@ -172,22 +191,33 @@ def sync(force=False, proxy=None, log=print, batch=50, on_progress=None):
             stats["skip"] += 1
             continue
 
-        # Da READY (master da accept) -> dung duoc roi, bo qua.
-        if acc.get("master_ready") and not force:
+        assigned = acc.get("master_email")
+        master_dead = bool(assigned) and assigned not in live_set
+
+        # Da READY VA master con SONG -> dung duoc roi, bo qua.
+        # (Neu master CHET thi du "ready" van phai re-link -> khong bo qua.)
+        if acc.get("master_ready") and not master_dead and not force:
             stats["skip"] += 1
             continue
 
-        # GAN MASTER: master chet/chua co -> gan master song (round-robin).
+        # GAN MASTER (chia theo suc chua):
+        #  - chua co master     -> gan master con cho nhieu nhat
+        #  - master CHET         -> re-link sang master song (go master chet khoi ws)
+        #  - master SONG da DAY va TK chua ready -> chuyen sang master con cho
         cleanup = []
-        assigned = acc.get("master_email")
         if not assigned:
             assigned = _pick_live_master(); acc["master_email"] = assigned
-        elif assigned not in live_emails:
+        elif master_dead:
             old = assigned
             assigned = _pick_live_master(); acc["master_email"] = assigned
             acc["master_onboarded"] = False; acc["master_ready"] = False
             cleanup = [old]
-            log(f"  RE-LINK {email}: master {old} chet -> {assigned}")
+            log(f"  RE-LINK {email}: master {old} CHET -> {assigned}")
+        elif _is_full(assigned) and not acc.get("master_ready"):
+            old = assigned
+            assigned = _pick_live_master(); acc["master_email"] = assigned
+            acc["master_onboarded"] = False; acc["master_ready"] = False
+            log(f"  RE-BALANCE {email}: master {old} DAY -> {assigned}")
         # KHONG bo qua TK da onboarded: re-invite (nhanh, dung refresh_token) de chac
         # chan co invite cho, roi buoc accept se thuc su lien ket (hoac bao bi chan).
         mw = pool.get(assigned)

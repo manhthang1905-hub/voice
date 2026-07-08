@@ -96,6 +96,81 @@ def remove_master(email):
             pass
 
 
+def ensure_master(email, status="expired"):
+    """Tao 1 entry master rong (chua co refresh_token) neu chua co -> ung vien cho
+    auto-login lay token. Dung khi NHAP master moi bang credential (chua login).
+    -> True neu vua tao moi.
+    """
+    email = (email or "").strip()
+    if not email:
+        return False
+    with _LOCK:
+        masters = _load_raw()
+        for m in masters:
+            if m.get("email") == email:
+                return False
+        masters.append({"email": email, "refresh_token": "",
+                        "added_at": int(time.time()), "status": status})
+        _save_raw(masters)
+    return True
+
+
+def update_refresh_token(email, refresh_token):
+    """Luu refresh_token MOI (Firebase co the xoay token moi lan refresh).
+
+    Chi ghi khi token thuc su doi -> tranh ghi file lien tuc. Giu master song lau
+    dai (khong luu token xoay -> token cu dan chet nhu paloukite). -> True neu co ghi.
+    """
+    email = (email or "").strip()
+    refresh_token = (refresh_token or "").strip()
+    if not email or not refresh_token:
+        return False
+    with _LOCK:
+        masters = _load_raw()
+        for m in masters:
+            if m.get("email") == email:
+                if m.get("refresh_token") != refresh_token:
+                    m["refresh_token"] = refresh_token
+                    m["status"] = "active"
+                    _save_raw(masters)
+                    return True
+                return False
+    return False
+
+
+def mark_expired(email, reason="", status="expired"):
+    """Danh dau master CHET: status='expired' (het han, login lai duoc) hoac
+    'suspended' (bi khoa vinh vien, KHONG cuu duoc). Persist vao file -> phien sau
+    tu bo qua + BI LOAI khoi live_masters -> cac TK cua no tu re-link sang master
+    song khac o lan 'Lien ket Master'. -> True neu tim thay.
+    """
+    email = (email or "").strip()
+    with _LOCK:
+        masters = _load_raw()
+        found = False
+        for m in masters:
+            if m.get("email") == email:
+                m["status"] = status
+                m["expired_at"] = int(time.time())
+                if reason:
+                    m["expired_reason"] = str(reason)[:160]
+                found = True
+        if not found:
+            # master legacy chua co trong masters.json -> them vao de luu status
+            for m in list_masters():
+                if m.get("email") == email:
+                    m["status"] = status
+                    m["expired_at"] = int(time.time())
+                    if reason:
+                        m["expired_reason"] = str(reason)[:160]
+                    masters.append(m)
+                    found = True
+                    break
+        if found:
+            _save_raw(masters)
+    return found
+
+
 def set_status(email, status):
     """Bat/tat 1 master ('active'|'disabled'). Master legacy se duoc copy vao
     masters.json de luu duoc status."""

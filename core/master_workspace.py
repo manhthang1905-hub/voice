@@ -24,6 +24,8 @@ Dung:
 import os
 import json
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -60,7 +62,14 @@ class MasterWorkspace:
         self._master_tok = None          # id_token "goc" cua master
         self._master_exp = 0
         self._ws_tokens = {}             # ws_id -> (token, exp)
-        self._exhausted = set()          # ws_id het quota trong phien nay
+        self._exhausted = set()          # ws_id het quota (TAM: reset se quay lai)
+        self._disabled = set()           # ws_id bi ban/vo hieu hoa (VINH VIEN)
+        # Pool workspace (probe SONG SONG + cache) -> next_workspace nhanh gap ~14x.
+        # Moi phan tu: {"workspace_id","remaining","token"} ; sort remaining giam dan.
+        self._pool = None
+        self._pool_time = 0
+        self._probed = set()      # ws da probe (khoi probe lai o lan build sau)
+        self._pool_lock = threading.Lock()
 
     # ---------- token ----------
     def _headers(self, token: str) -> dict:
@@ -77,6 +86,17 @@ class MasterWorkspace:
         res = firebase_refresh(self.refresh_token, proxy=None)
         self._master_tok = res["id_token"]
         self._master_exp = time.time() + int(res.get("expires_in", 3600))
+        # Firebase co the tra refresh_token MOI (xoay token). Luu lai -> master khong
+        # bi chet dan vi token cu (nhu paloukite). Chi ghi khi token thuc su doi.
+        new_rt = (res.get("refresh_token") or "").strip()
+        if new_rt and new_rt != self.refresh_token:
+            self.refresh_token = new_rt
+            if self.email:
+                try:
+                    from core import masters_store
+                    masters_store.update_refresh_token(self.email, new_rt)
+                except Exception:
+                    pass
         return self._master_tok
 
     # ---------- workspaces ----------
@@ -151,27 +171,133 @@ class MasterWorkspace:
         pool.sort(key=lambda x: -x["remaining"])
         return pool
 
-    def next_workspace(self, need_chars: int = 500):
-        """Tra ve (workspace_id, scoped_token, remaining) cho workspace dau tien
-        con >= need_chars. None neu het.
+    def _probe_ws(self, ws: str):
+        """Sign in + doc quota 1 workspace -> dict (kem token + ngay reset) hoac None."""
+        try:
+            tok = self.sign_into(ws)
+            q = self.workspace_quota(tok)
+            return {"workspace_id": ws, "remaining": q["remaining"], "token": tok,
+                    "reset_unix": q.get("reset_unix", 0) or 0}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _edf_key(entry):
+        """Sort key EDF (Earliest-Deadline-First): TK reset SOM NHAT truoc -> dung
+        quota truoc khi bi mat luc reset. reset_unix=0 (chua biet) coi la xa nhat.
+        Cung ngay reset -> uu tien con nhieu quota hon."""
+        r = entry.get("reset_unix", 0) or 0
+        return (r if r > 0 else 9_000_000_000_000, -entry.get("remaining", 0))
+
+    def build_pool(self, max_workers: int = 20, enough: int = 30,
+                   min_remaining: int = 500) -> list:
+        """Probe THEM workspace SONG SONG -> BO SUNG vao pool (sort remaining giam dan).
+
+        Toi uu: DUNG SOM khi tim du `enough` workspace con quota (>= min_remaining)
+        thay vi probe HET vai tram ws (~2 phut). Bo qua ws da probe/exhausted -> moi lan
+        goi se probe LO MOI (khong lap lai). Token cache trong pool -> tra ve tuc thi.
         """
-        for w in self.list_workspaces():
-            ws = w.get("workspace_id")
-            if not ws or ws in self._exhausted:
-                continue
-            try:
-                tok = self.sign_into(ws)
-                q = self.workspace_quota(tok)
-            except Exception:
-                continue
-            if q["remaining"] >= need_chars:
-                return ws, tok, q["remaining"]
-            else:
-                self._exhausted.add(ws)
-        return None
+        # Nap them ws da CHET/disabled tu roster -> bo qua ngay (khoi probe/thu lai).
+        try:
+            from core.mode_b_accounts import dead_workspace_ids
+            self._disabled |= dead_workspace_ids()
+        except Exception:
+            pass
+        with self._pool_lock:
+            if self._pool is None:
+                self._pool = []
+            skip = set(self._probed) | set(self._exhausted) | set(self._disabled)
+        ids = [w.get("workspace_id") for w in self.list_workspaces()
+               if w.get("workspace_id") and w.get("workspace_id") not in skip]
+        found = []
+        good = 0
+        if ids:
+            batch = max_workers * 2
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                for start in range(0, len(ids), batch):
+                    lot = ids[start:start + batch]
+                    for ws, r in zip(lot, ex.map(self._probe_ws, lot)):
+                        self._probed.add(ws)
+                        if r:
+                            found.append(r)
+                            if r["remaining"] >= min_remaining:
+                                good += 1
+                    if good >= enough:
+                        break
+        with self._pool_lock:
+            self._pool.extend(found)
+            self._pool.sort(key=self._edf_key)   # EDF: reset som nhat truoc
+            self._pool_time = time.time()
+            return list(self._pool)
+
+    def next_workspace(self, need_chars: int = 500):
+        """Tra ve (workspace_id, scoped_token, remaining) — workspace con nhieu quota
+        nhat va >= need_chars. None neu het.
+
+        Dung pool probe-song-song + cache: lan dau build_pool (~vai giay cho vai tram
+        workspace), cac lan sau tra ve tuc thi. Quota da dung duoc tru dan trong pool;
+        workspace bi mark_exhausted (het quota/disabled khi convert) se bi bo qua.
+        """
+        with self._pool_lock:
+            stale = self._pool is not None and (time.time() - self._pool_time > 2400)
+            if stale:
+                # >40 phut: token gan het han + TK het quota co the DA RESET.
+                # Vut pool + XOA _exhausted (cho probe lai -> TK reset xong quay lai).
+                # GIU _disabled (chet vinh vien, khoi probe lai). -> hop tool 24/7.
+                self._pool = None
+                self._probed = set()
+                self._exhausted = set()
+            need_build = self._pool is None
+        if need_build:
+            self.build_pool()
+
+        # BIEN AN TOAN: quota trong pool la uoc luong (doc luc build, co the da lech
+        # do TK bi dung o cho khac). Chi chon TK con DU THOAI MAI (need + buffer) ->
+        # tranh "bao con X nhung het quota" -> bot churn doi TK. Buffer = 20% or 1500.
+        buffer = max(1500, int(need_chars * 0.2))
+        need_safe = need_chars + buffer
+
+        def _pick():
+            with self._pool_lock:
+                for entry in self._pool:
+                    ws = entry["workspace_id"]
+                    if ws in self._exhausted or ws in self._disabled:
+                        continue
+                    if entry["remaining"] >= need_safe:
+                        entry["remaining"] -= need_chars   # tru quota uoc luong da dung
+                        return (ws, entry["token"], entry["remaining"] + need_chars)
+            return None
+
+        pick = _pick()
+        if pick:
+            return pick
+        # Pool hien tai het workspace dung duoc -> build_pool DUNG SOM nen con nhieu ws
+        # chua probe. Build lai (probe them lo tiep, bo qua ws da exhausted) roi thu lai.
+        self.build_pool()
+        return _pick()
+
+    def ready_count(self) -> int:
+        """So workspace SAN SANG dung ngay (con quota, chua exhausted/disabled)."""
+        with self._pool_lock:
+            if not self._pool:
+                return 0
+            return sum(1 for e in self._pool
+                       if e.get("remaining", 0) > 500
+                       and e["workspace_id"] not in self._exhausted
+                       and e["workspace_id"] not in self._disabled)
+
+    def ensure_warm(self, min_ready: int = 10):
+        """Nap truoc pool neu so token san sang < min_ready -> khi can la co ngay."""
+        if self.ready_count() < min_ready:
+            self.build_pool()
 
     def mark_exhausted(self, workspace_id: str):
+        """TK het quota (TAM THOI) -> bo qua den khi rebuild (co the da reset)."""
         self._exhausted.add(workspace_id)
+
+    def mark_disabled(self, workspace_id: str):
+        """TK bi vo hieu hoa/ban (VINH VIEN) -> khong bao gio probe/dung lai."""
+        self._disabled.add(workspace_id)
 
     # ---------- onboard (sync) account moi ----------
     def invite_master(self, worker_token: str) -> tuple:

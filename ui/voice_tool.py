@@ -332,6 +332,18 @@ class VoiceWorker(QThread):
                         if not missing:
                             break
 
+                        # === SONG SONG (fast-path): generate nhieu chunk cung luc ===
+                        # An toan: chunk nao song song KHONG xong se roi xuong vong tuan
+                        # tu ben duoi lam not -> khong the sai ket qua, chi nhanh hon.
+                        if (len(missing) > 1 and self._master_workspace_enabled()
+                                and self._parallel_chunks_enabled()):
+                            self._convert_chunks_parallel(
+                                conv, chunks, checkpoint_dir, missing)
+                            missing = self._find_missing_chunk_indexes(
+                                checkpoint_dir, len(chunks))
+                            if not missing:
+                                break
+
                         start_chunk = missing[0]
                         if start_chunk > 0:
                             self.log_signal.emit(
@@ -351,13 +363,15 @@ class VoiceWorker(QThread):
                             chunk = chunks[i]
                             chunk_chars = len(chunk)
 
-                            # Kiem tra TK hien tai con du credit khong
+                            # Kiem tra TK hien tai con du credit khong (co BIEN AN TOAN
+                            # de tranh tai dung TK sat nguong -> het quota giua chung).
                             tk_remaining = getattr(
                                 self, '_tk_quota', 10000) - self._chars_used
                             mult = getattr(self, '_credit_multiplier', 1)
                             need_credits = chunk_chars * mult
+                            buffer = max(1500, int(need_credits * 0.2))
                             need_new = (not self._current_token
-                                        or tk_remaining < need_credits)
+                                        or tk_remaining < need_credits + buffer)
 
                             if need_new:
                                 if self._added_voices:
@@ -479,7 +493,9 @@ class VoiceWorker(QThread):
                                     f"  chunk {i+1}/{len(chunks)} OK "
                                     f"({len(audio):,} bytes)")
 
-                                # Re-check quota + token expiry
+                                # Re-check token expiry (KHONG check_quota moi chunk nua:
+                                # pool da theo doi quota + tu roi TK khi het -> bo goi
+                                # /v1/user/subscription ~2-3s/chunk = nhanh hon).
                                 if self.mode == "b" and self._current_token:
                                     if time.time() - self._token_time > 3000:
                                         self.log_signal.emit(
@@ -492,15 +508,6 @@ class VoiceWorker(QThread):
                                             self._current_token = t
                                             self._current_email = e
                                             self._chars_used = 0
-                                    try:
-                                        q = check_quota(
-                                            self._current_token, proxy=None)
-                                        if q:
-                                            real_left = q["chars_remaining"]
-                                            self._tk_quota = (
-                                                real_left + self._chars_used)
-                                    except Exception:
-                                        pass
                             else:
                                 saved = len(chunks) - len(
                                     self._find_missing_chunk_indexes(
@@ -512,8 +519,13 @@ class VoiceWorker(QThread):
                                 break
 
                             if i < len(chunks) - 1:
-                                import random
-                                time.sleep(2 + random.uniform(1, 3))
+                                # Master mode (workspace token, khong bi flag) -> nghi
+                                # ngan. Mode khac giu 3-5s de tranh rate-limit/flag.
+                                if self._master_workspace_enabled():
+                                    time.sleep(0.5)
+                                else:
+                                    import random
+                                    time.sleep(2 + random.uniform(1, 3))
 
                         if self._cancelled:
                             break
@@ -1183,6 +1195,89 @@ class VoiceWorker(QThread):
             pass
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+    def _parallel_chunks_enabled(self):
+        """Option: bat generate SONG SONG cac chunk (config 'parallel_chunks').
+
+        Mac dinh TAT (giu luong tuan tu cu an toan). Bat o Auto Convert > Cai dat
+        nang cao. Chi ap dung cho master mode + file nhieu chunk.
+        """
+        try:
+            return bool(self.config.get("parallel_chunks", True))
+        except Exception:
+            return True
+
+    def _convert_chunks_parallel(self, conv, chunks, checkpoint_dir, missing):
+        """Generate cac chunk THIEU cung luc (moi chunk 1 token rieng tu pool).
+
+        DOC LAP, khong dung self._current_token/self.voice_id-mutate -> an toan chay
+        song song. Chunk nao khong xong -> de trong, vong tuan tu ben ngoai lam not.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from core.convert import (add_voice_to_account, QuotaExceededError,
+                                   IPFlaggedError, VoiceNotFoundError,
+                                   VoiceRestrictedError)
+        from core.api_client import ElevenLabsError
+
+        pool = self._get_master_pool()
+        proxy = self._get_proxy()
+        is_lib = self._is_library_voice()
+        model = self._library_studio_model() if is_lib else None
+        mult = getattr(self, '_credit_multiplier', 1)
+        try:
+            workers = int(self.config.get("parallel_chunk_workers", 3))
+        except Exception:
+            workers = 3
+        workers = max(2, min(workers, len(missing), 6))
+
+        def _gen_one(idx):
+            chunk = chunks[idx]
+            chunk_file = self._chunk_file_path(checkpoint_dir, idx)
+            for _ in range(20):
+                if self._cancelled:
+                    return idx, False
+                pick = pool.next_workspace(need_chars=len(chunk) * mult)
+                if not pick:
+                    return idx, False
+                _email, ws, token, _rem = pick
+                try:
+                    vid = self.voice_id
+                    if is_lib:
+                        nid = add_voice_to_account(token, vid, proxy=proxy)
+                        if nid:
+                            vid = nid
+                    audio = conv.convert_text(chunk, vid, token,
+                                              proxy=proxy, model_id=model)
+                    if audio and self._validate_audio(audio):
+                        with open(chunk_file, 'wb') as f:
+                            f.write(audio)
+                        self.log_signal.emit(
+                            f"  [//] chunk {idx+1}/{len(chunks)} OK ({len(audio):,} bytes)")
+                        return idx, True
+                    pool.mark_bad_workspace(ws)   # audio invalid -> doi ws
+                except VoiceRestrictedError:
+                    return idx, False             # voice can plan cao -> bo
+                except (QuotaExceededError, IPFlaggedError, VoiceNotFoundError):
+                    pool.mark_bad_workspace(ws)   # tam thoi -> reset se quay lai
+                except ElevenLabsError as e:
+                    if getattr(e, 'disabled', False):
+                        pool.mark_disabled_workspace(ws)   # vinh vien
+                    elif (getattr(e, 'quota', False) or getattr(e, 'flagged', False)
+                            or getattr(e, 'status_code', 0) == 404):
+                        pool.mark_bad_workspace(ws)        # tam thoi
+                    # loi khac -> thu ws khac
+                except Exception:
+                    pass   # network... -> thu lai
+            return idx, False
+
+        ok = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for idx, done in ex.map(_gen_one, missing):
+                if done:
+                    ok += 1
+        self.log_signal.emit(
+            f"  [//] Song song {workers} luong: {ok}/{len(missing)} chunk xong")
+        return ok
+
     def _convert_chunk_with_retry(self, conv, chunk, chunk_idx,
                                   total_chunks, chunk_chars):
         """Convert 1 chunk. Xử lý m�?i lỗi, tự recover.
@@ -1457,6 +1552,14 @@ class VoiceWorker(QThread):
                         except Exception:
                             pass
                 self._skipped_emails.add(self._current_email)
+                # Danh dau workspace het quota (TAM THOI) -> pool khong offer lai
+                # (het churn "hết quota → đổi TK" lien tuc); reset xong se quay lai.
+                _qws = getattr(self, '_current_ws_id', "") or ""
+                if _qws:
+                    try:
+                        self._get_master_pool().mark_bad_workspace(_qws)
+                    except Exception:
+                        pass
                 audit("quota_exceeded",
                       email=self._current_email or "",
                       chars_used=self._chars_used,
@@ -1565,10 +1668,10 @@ class VoiceWorker(QThread):
                     self.log_signal.emit(
                         f"  🚫 TK {failed_email} bị vô hiệu hóa (subscription "
                         f"disabled) → bỏ qua, đổi TK [{account_switches}]")
-                    # master mode: danh dau workspace HONG -> pool khong pick lai
+                    # master mode: workspace bi VO HIEU HOA (vinh vien) -> pool loai han
                     if bad_ws:
                         try:
-                            self._get_master_pool().mark_bad_workspace(bad_ws)
+                            self._get_master_pool().mark_disabled_workspace(bad_ws)
                             from core.mode_b_accounts import (
                                 set_remaining_by_workspace, mark_dead_by_workspace)
                             mark_dead_by_workspace(bad_ws, "subscription_disabled")
@@ -1691,9 +1794,11 @@ class VoiceWorker(QThread):
             return False
 
     def _get_master_pool(self):
+        # Dung POOL CHUNG (build 1 lan, tai dung cho moi batch) -> khong build lai
+        # ~2 phut/channel nhu truoc. Token + quota cache trong pool.
         if not getattr(self, "_mpool", None):
-            from core.master_pool import MasterPool
-            self._mpool = MasterPool()
+            from core.master_pool import get_shared_pool
+            self._mpool = get_shared_pool()
         return self._mpool
 
     def _get_token(self, need_chars=1000):
@@ -1722,6 +1827,10 @@ class VoiceWorker(QThread):
                 self._current_auth_data = None
                 self._current_ws_id = ws_id
                 self._token_time = time.time()   # tranh refresh nham moi chunk
+                # ĐỒNG BỘ quota TK voi pool + reset dem -> logic tai-dung-token (need_new)
+                # tinh dung, khong tai dung TK sat nguong -> het "bao con nhung het quota".
+                self._tk_quota = remaining
+                self._chars_used = 0
                 # Ghi quota THAT ve roster (theo workspace_id) -> tab Accounts hien dung
                 try:
                     from core.mode_b_accounts import set_remaining_by_workspace
@@ -2215,6 +2324,84 @@ class UpdateWorker(QThread):
             self.done.emit(ok, msg)
         except Exception as e:
             self.done.emit(False, f"loi: {str(e)[:100]}")
+
+
+class StartupRecoverWorker(QThread):
+    """Luc mo tool: tu dong login lai master HET HAN — nhung CHI khi THIEU master song.
+
+    QUAN TRONG: login master mo Chrome + 2FA rat NANG (~2 phut/master) va tranh
+    mang/proxy voi Auto Convert -> lam CHAM generate. Vi vay:
+      - Chi chay khi so master SONG < MIN (mac dinh 2) -> luc that su can them master.
+      - Con du master song thi KHONG chay (de Auto Convert chay nhanh). Nguoi dung
+        chu dong bam '🔧 Tu dong login lai' khi tool ranh de nap them master moi.
+    """
+    log_signal = pyqtSignal(str)
+    done = pyqtSignal(dict)
+    MIN_LIVE = 2
+
+    def run(self):
+        try:
+            from core.masters_store import list_masters, count_active
+            from core.master_login import _read_master_creds, recover_expired_masters
+            # Du master song -> KHONG khoi phuc nen (tranh lam cham Auto Convert)
+            if count_active() >= self.MIN_LIVE:
+                return
+            targets = [m.get("email") for m in list_masters()
+                       if (m.get("status") or "active") == "expired"
+                       and _read_master_creds(m.get("email"))[0]]
+            if not targets:
+                return
+            self.log_signal.emit(
+                f"[Auto-recover] Thieu master song -> login lai {len(targets)} master nen...")
+            res = recover_expired_masters(
+                on_log=lambda m: self.log_signal.emit("[Auto-recover] " + m))
+            self.done.emit(res)
+        except Exception as e:
+            self.log_signal.emit(f"[Auto-recover] loi: {str(e)[:100]}")
+
+
+class MaintenanceWorker(QThread):
+    """Bao tri nen dinh ky (24/7): quet quota + luu ngay reset + canh bao can nguon
+    + (tuy chon) tu lien ket master. Doc-only voi ElevenLabs, khong ton credit."""
+    log_signal = pyqtSignal(str)
+    done = pyqtSignal(dict)
+
+    def __init__(self, do_relink=False):
+        super().__init__()
+        self.do_relink = do_relink
+        self._stop = False
+
+    def cancel(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            from core.maintenance import run_maintenance
+            res = run_maintenance(
+                on_log=lambda m: self.log_signal.emit(m),
+                should_stop=lambda: self._stop,
+                do_relink=self.do_relink)
+            self.done.emit(res or {})
+        except Exception as e:
+            self.log_signal.emit(f"[Maintenance] loi: {str(e)[:100]}")
+
+
+class PoolWarmerWorker(QThread):
+    """CHUAN BI TRUOC token: nap san pool workspace o NEN -> khi Auto Convert can
+    token la co NGAY, khong phai doi build pool (~50s) giua chung."""
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, target=40):
+        super().__init__()
+        self.target = target
+
+    def run(self):
+        try:
+            from core.master_pool import get_shared_pool
+            n = get_shared_pool().warm(target_ready=self.target)
+            self.log_signal.emit(f"[Pool] San sang {n} token (nap truoc)")
+        except Exception as e:
+            self.log_signal.emit(f"[Pool] warm loi: {str(e)[:80]}")
 
 
 class VoiceTool(QMainWindow):
@@ -2828,6 +3015,10 @@ class VoiceTool(QMainWindow):
                 pass
 
         event.accept()
+        # Thoat HAN: force-kill moi thread con con lai (AutoWorker, VoiceWorker...)
+        # -> khong con pythonw.exe "zombie" trong Task Manager.
+        import os as _os
+        _os._exit(0)
 
 
 def main():
@@ -2836,8 +3027,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    # Khong dong app khi dong window (dung tray icon de dong that su)
-    app.setQuitOnLastWindowClosed(False)
+    # Dong cua so = thoat app HAN (khong thu nho xuong tray nua).
+    app.setQuitOnLastWindowClosed(True)
 
     # Bat loi khong xu ly duoc trong Qt slots (main thread)
     _crash_log = os.path.join(
@@ -2878,79 +3069,6 @@ def main():
 
     window = VoiceTool()
 
-    # === SYSTEM TRAY ICON ===
-    from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction
-    from PyQt5.QtGui import QIcon
-    import base64
-
-    # Tao icon don gian (16x16 mau xanh) de hien thi tray
-    _icon_b64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlz"
-        "AAALEwAACxMBAJqcGAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAABeSURB"
-        "VDiNY2AYBfQHAAImAAGpgP///////////////////////////////wAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//2Q=="
-    )
-    try:
-        import struct, zlib
-        # Tao icon 16x16 mau xanh la cay (#27ae60)
-        w, h = 16, 16
-        raw = struct.pack('>IHHI', 0x474e5089, w, h, 0) # placeholder
-        _icon_path = os.path.join(os.path.dirname(_crash_log), "tray_icon.png")
-        # Tao PNG 16x16 don gian bang cach ghi bytes thu cong
-        def _make_png(r, g, b):
-            def _png_chunk(name, data):
-                c = zlib.crc32(name + data) & 0xffffffff
-                return struct.pack('>I', len(data)) + name + data + struct.pack('>I', c)
-            signature = b'\x89PNG\r\n\x1a\n'
-            ihdr = _png_chunk(b'IHDR', struct.pack('>IIBBBBB', 16, 16, 8, 2, 0, 0, 0))
-            raw_data = b''
-            for _ in range(16):
-                raw_data += b'\x00' + bytes([r, g, b] * 16)
-            idat = _png_chunk(b'IDAT', zlib.compress(raw_data))
-            iend = _png_chunk(b'IEND', b'')
-            return signature + ihdr + idat + iend
-        png_bytes = _make_png(0x27, 0xae, 0x60)
-        with open(_icon_path, 'wb') as f:
-            f.write(png_bytes)
-        tray_icon_obj = QIcon(_icon_path)
-    except Exception:
-        tray_icon_obj = QIcon()
-
-    tray = QSystemTrayIcon(tray_icon_obj, app)
-    tray.setToolTip("11Lab Voice Tool")
-
-    tray_menu = QMenu()
-    act_show = QAction("Hiện cửa sổ", app)
-    act_quit = QAction("Thoát", app)
-
-    def _show_window():
-        window.showNormal()
-        window.raise_()
-        window.activateWindow()
-        # Kiem tra window co nam trong man hinh khong
-        screen = app.primaryScreen().availableGeometry()
-        geo = window.frameGeometry()
-        if not screen.intersects(geo):
-            # Window ra ngoai man hinh -> dua ve center
-            window.move(
-                screen.x() + (screen.width() - window.width()) // 2,
-                screen.y() + (screen.height() - window.height()) // 2,
-            )
-
-    def _quit_app():
-        # Dong that su (qua closeEvent)
-        window.close()
-
-    act_show.triggered.connect(_show_window)
-    act_quit.triggered.connect(_quit_app)
-    tray_menu.addAction(act_show)
-    tray_menu.addSeparator()
-    tray_menu.addAction(act_quit)
-    tray.setContextMenu(tray_menu)
-    tray.activated.connect(lambda reason: _show_window()
-                           if reason == QSystemTrayIcon.DoubleClick else None)
-    tray.show()
-
     # === HIEN THI WINDOW ===
     window.show()
 
@@ -2962,6 +3080,80 @@ def main():
             screen.x() + (screen.width() - window.width()) // 2,
             screen.y() + (screen.height() - window.height()) // 2,
         )
+
+    # === TU DONG KHOI PHUC MASTER HET HAN (chay nen, 5s sau khi mo tool) ===
+    # Giu tham chieu tren window de worker khong bi GC giua chung.
+    def _start_master_recover():
+        try:
+            window._startup_recover = StartupRecoverWorker()
+            window._startup_recover.log_signal.connect(lambda m: log.info(m))
+            window._startup_recover.start()
+        except Exception as _e:
+            print(f"[Auto-recover] khong khoi dong duoc: {_e}")
+    QTimer.singleShot(5000, _start_master_recover)
+
+    # === BAO TRI NEN DINH KY (tool 24/7): quet quota + reset + canh bao + re-link ===
+    def _is_converting():
+        try:
+            if getattr(window, "worker", None) and window.worker.isRunning():
+                return True
+            at = getattr(window, "auto_tab", None)
+            if at and getattr(at, "voice_worker", None) and at.voice_worker.isRunning():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _maybe_maintenance():
+        try:
+            cfg = Config()
+            if not cfg.get("auto_maintenance", True):
+                return
+            if _is_converting():
+                return   # dang convert -> de lan sau, tranh tranh tai nguyen
+            mw = getattr(window, "_maint_worker", None)
+            if mw and mw.isRunning():
+                return
+            window._maint_worker = MaintenanceWorker(
+                do_relink=bool(cfg.get("auto_relink", False)))
+            window._maint_worker.log_signal.connect(lambda m: log.info(m))
+            window._maint_worker.start()
+        except Exception as _e:
+            print(f"[Maintenance] khong khoi dong duoc: {_e}")
+
+    try:
+        _interval_h = float(Config().get("maintenance_interval_hours", 12) or 12)
+    except Exception:
+        _interval_h = 12
+    window._maint_timer = QTimer()
+    window._maint_timer.timeout.connect(_maybe_maintenance)
+    window._maint_timer.start(max(1, int(_interval_h * 3600 * 1000)))
+    # Chay 1 lan ~5 phut sau khi mo tool (sau khi recover master xong)
+    QTimer.singleShot(300000, _maybe_maintenance)
+
+    # === CHUAN BI TRUOC TOKEN (pool warmer): nap san token o nen ===
+    def _warm_pool():
+        w = getattr(window, "_pool_warmer", None)
+        if w and w.isRunning():
+            return
+        window._pool_warmer = PoolWarmerWorker(target=40)
+        window._pool_warmer.log_signal.connect(lambda m: log.info(m))
+        window._pool_warmer.start()
+
+    def _topup_pool():
+        # Nap them khi token san sang xuong thap -> luon co san truoc khi can
+        try:
+            from core.master_pool import shared_pool_ready
+            r = shared_pool_ready()
+            if 0 <= r < 15:
+                _warm_pool()
+        except Exception:
+            pass
+
+    QTimer.singleShot(8000, _warm_pool)          # nap truoc ~8s sau khi mo tool
+    window._warm_timer = QTimer()
+    window._warm_timer.timeout.connect(_topup_pool)
+    window._warm_timer.start(90000)              # kiem tra top-up moi 90s
 
     sys.exit(app.exec_())
 

@@ -49,6 +49,24 @@ def load_accounts():
     return accounts
 
 
+def dead_workspace_ids():
+    """Tap workspace_id cua cac TK da CHET/disabled (roster) -> pool bo qua ngay,
+    khong probe/thu lai (bot churn 'TK loi'). Tich luy qua cac phien."""
+    out = set()
+    if not os.path.exists(STATUS_JSON):
+        return out
+    try:
+        data = _load_json_file(STATUS_JSON)
+        for acc in data.get("accounts", []):
+            if acc.get("status") in ("dead", "flagged"):
+                w = (acc.get("workspace_id") or "").strip()
+                if w:
+                    out.add(w)
+    except Exception:
+        pass
+    return out
+
+
 def get_alive_accounts(min_chars=500):
     """Return accounts that can enter the Mode B queue.
 

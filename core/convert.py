@@ -944,19 +944,17 @@ class Convert:
             if i < len(chunks) - 1:
                 time.sleep(2 + random.uniform(1, 3))
 
-        # Ghép chunks
+        # Ghép chunks -> ghi thang ra mp3_path.
+        # (merge_audio_bytes YEU CAU output_file va TRA VE duong dan, khong tra bytes)
+        mp3_path = os.path.join(output_dir, f"{base_name}.mp3")
         if len(audio_parts) == 1:
-            final_audio = audio_parts[0]
+            with open(mp3_path, 'wb') as f:
+                f.write(audio_parts[0])
         else:
             from core.audio_merger import merge_audio_bytes
-            final_audio = merge_audio_bytes(audio_parts, silence_between_ms=500)
+            merge_audio_bytes(audio_parts, mp3_path, silence_between_ms=500)
 
-        # Lưu file
-        mp3_path = os.path.join(output_dir, f"{base_name}.mp3")
-        with open(mp3_path, 'wb') as f:
-            f.write(final_audio)
-
-        size_mb = len(final_audio) / (1024 * 1024)
+        size_mb = os.path.getsize(mp3_path) / (1024 * 1024)
         log.info(f"Convert: XONG {mp3_path} ({size_mb:.1f} MB)")
         return mp3_path
 
@@ -998,6 +996,35 @@ class Convert:
             return None
 
         model = model_id or self.default_model
+
+        # DIRECT BEARER TRUOC (endpoint /with-timestamps) — day la duong DUY NHAT chay
+        # duoc cho token master + voice thu vien. Truoc day tool thu Studio (400/422) roi
+        # Ferndocs (401) trc -> phi 2 request chac chan fail moi chunk (~2-3s). Dua Bearer
+        # len dau -> nhanh hon han. Studio/Ferndocs giu lam fallback cho voice hiem can chung.
+        from core.api_client import ApiClient, ElevenLabsError
+        try:
+            client = ApiClient(auth_token=token, proxy=proxy)
+            return client.text_to_speech(
+                voice_id=voice_id,
+                text=text,
+                model_id=model,
+                stability=self.stability,
+                similarity_boost=self.similarity,
+                output_format=self.default_format,
+                language_code=self.language_code,
+            )
+        except (QuotaExceededError, IPFlaggedError,
+                VoiceNotFoundError, VoiceRestrictedError):
+            raise
+        except ElevenLabsError:
+            # Loi API that (het quota/disabled/flagged/auth/rate-limit) -> de caller
+            # xoay workspace/TK. Studio/Ferndocs dung auth khac nen KHONG cuu duoc.
+            raise
+        except Exception as bearer_err:
+            # Chi loi la (network/parse...) moi thu tiep Studio/Ferndocs.
+            log.warning(
+                f"Convert: Direct Bearer fail, thu Studio: {str(bearer_err)[:120]}")
+
         try:
             return _convert_text_studio(
                 token, voice_id, text, model, self.default_format,
@@ -1010,27 +1037,8 @@ class Convert:
             log.warning(
                 f"Convert: Studio API fail, thu Ferndocs: {str(studio_err)[:120]}")
 
-        try:
-            log.info("Convert: Library API via Ferndocs")
-            return _convert_text_ferndocs(
-                token, voice_id, text, model, self.default_format,
-                self.stability, self.similarity, self.speed,
-                self.language_code)
-        except (QuotaExceededError, IPFlaggedError,
-                VoiceNotFoundError, VoiceRestrictedError):
-            raise
-        except Exception as ferndocs_err:
-            log.warning(
-                f"Convert: Ferndocs fail, thu direct Bearer: {str(ferndocs_err)[:120]}")
-
-        from core.api_client import ApiClient
-        client = ApiClient(auth_token=token, proxy=proxy)
-        return client.text_to_speech(
-            voice_id=voice_id,
-            text=text,
-            model_id=model,
-            stability=self.stability,
-            similarity_boost=self.similarity,
-            output_format=self.default_format,
-            language_code=self.language_code,
-        )
+        log.info("Convert: Library API via Ferndocs")
+        return _convert_text_ferndocs(
+            token, voice_id, text, model, self.default_format,
+            self.stability, self.similarity, self.speed,
+            self.language_code)
