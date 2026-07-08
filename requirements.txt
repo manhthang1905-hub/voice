@@ -4,5 +4,22 @@ requests>=2.28
 PySocks>=1.7        # SOCKS5 proxy support
 flask>=2.3          # 4G proxy server (chay tren may co dien thoai)
 DrissionPage>=4.0   # Chrome automation: login master, register, browser fallback
-langid>=1.1.6       # Language detection (Layer 2)
-langdetect>=1.0.9   # Language detection (Layer 3, Google port)
+
+# Doc Google Sheet (Auto Convert: voice_map + folder_map)
+gspread>=6.0
+oauth2client>=4.1
+
+# Login master + 2FA tu dong (auto_login_master)
+pyotp>=2.9          # sinh ma 2FA (TOTP)  <-- thieu cai nay = khong lay duoc ma 2FA
+ddddocr>=1.4        # giai CAPTCHA Google khi login
+pyperclip>=1.8      # dan mat khau / OTP vao form login
+
+# Ghep + chuan hoa audio (can ffmpeg trong ffmpeg/bin hoac tren PATH)
+pydub>=0.25
+
+# Language detection (auto chon ngon ngu)
+langid>=1.1.6       # Layer 2
+langdetect>=1.0.9   # Layer 3 (Google port)
+
+# (Tuy chon) Tao phu de SRT - chi cai neu bat 'Tu tao phu de SRT'
+# faster-whisper>=1.0
