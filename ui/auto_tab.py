@@ -418,10 +418,17 @@ class AutoSettingsDialog(QDialog):
         self.sp_chunk.setValue(int(c.get("max_chunk_size", 5000)))
         form.addRow("Chunk tối đa (ký tự):", self.sp_chunk)
 
+        self.chk_autostart = QCheckBox("Tự động chạy Auto Convert khi mở tool")
+        self.chk_autostart.setToolTip(
+            "TẮT ô này -> mở tool KHÔNG tự chạy (phải bấm BẮT ĐẦU AUTO thủ công).\n"
+            "Dùng cho máy chỉ để dự phòng / không muốn tự convert.")
+        self.chk_autostart.setChecked(bool(c.get("auto_start_enabled", True)))
+        form.addRow("", self.chk_autostart)
+
         self.sp_delay_start = QSpinBox()
         self.sp_delay_start.setRange(0, 600); self.sp_delay_start.setSuffix("s")
         self.sp_delay_start.setValue(int(c.get("auto_start_delay_sec", 60)))
-        form.addRow("Auto chạy sau khi mở tool:", self.sp_delay_start)
+        form.addRow("  Chạy sau khi mở (giây):", self.sp_delay_start)
 
         self.sp_poll = QSpinBox()
         self.sp_poll.setRange(60, 1800); self.sp_poll.setSuffix("s")
@@ -539,6 +546,7 @@ class AutoSettingsDialog(QDialog):
         c.set("voice_stability", round(self.sp_stab.value(), 2))
         c.set("voice_similarity_boost", round(self.sp_sim.value(), 2))
         c.set("max_chunk_size", self.sp_chunk.value())
+        c.set("auto_start_enabled", self.chk_autostart.isChecked())
         c.set("auto_start_delay_sec", self.sp_delay_start.value())
         c.set("request_delay", round(self.sp_reqdelay.value(), 2))
         c.set("max_retries", self.sp_retry.value())

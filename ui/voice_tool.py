@@ -2648,13 +2648,15 @@ class VoiceTool(QMainWindow):
         self._update_worker = None
 
         # Tu dong chay Auto Convert sau N giay khi mo tool (mac dinh 60s).
-        # Tat: dat "auto_start_delay_sec": 0 trong config/settings.json.
+        # TAT: bo tick "Tu dong chay Auto Convert" o Cai dat nang cao
+        # (auto_start_enabled=False), hoac dat delay=0.
         try:
             self._auto_start_timer = QTimer(self)
             self._auto_start_timer.setSingleShot(True)
             self._auto_start_timer.timeout.connect(self._auto_start_auto_convert)
+            enabled = bool(self.config.get("auto_start_enabled", True))
             delay = int(self.config.get("auto_start_delay_sec", 60))
-            if delay > 0:
+            if enabled and delay > 0:
                 self._auto_start_timer.start(delay * 1000)
         except Exception:
             pass
