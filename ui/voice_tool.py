@@ -2413,6 +2413,8 @@ class VoiceTool(QMainWindow):
         self.language_worker = None
         self._last_language_voice_id = ""
         self._file_list = []
+        self._jobs = []            # hang doi: [{voice_id, folder, language, files}]
+        self._job_idx = 0
         self._elapsed_timer = QElapsedTimer()
         self._timer = QTimer()
         self._timer.timeout.connect(self._update_elapsed)
@@ -2554,7 +2556,43 @@ class VoiceTool(QMainWindow):
         btn_out.clicked.connect(self._browse_output)
         io_row.addWidget(btn_out, 1, 2)
 
+        # Nut them job vao hang doi (cung dong voi Input/Output)
+        io_row.addWidget(QLabel(""), 2, 0)
+        self.btn_add_job = QPushButton("➕ Thêm job (thư mục + voice này)")
+        self.btn_add_job.setToolTip(
+            "Thêm cặp (Voice ID + Thư mục Input) hiện tại vào danh sách.\n"
+            "Thêm nhiều job cho nhiều thư mục/voice khác nhau rồi bấm START chạy HẾT 1 lượt.")
+        self.btn_add_job.setStyleSheet(
+            "background:#2980b9; color:white; font-weight:bold; padding:5px 12px;")
+        self.btn_add_job.clicked.connect(self._add_job)
+        io_row.addWidget(self.btn_add_job, 2, 1)
         layout.addLayout(io_row)
+
+        # === HANG DOI JOB: nhieu (thu muc + voice) chay 1 luot ===
+        job_hdr = QHBoxLayout()
+        self.lbl_jobs = QLabel("Danh sách job: 0  (để trống = chạy 1 thư mục hiện tại)")
+        self.lbl_jobs.setStyleSheet("color:#555; font-size:11px; font-weight:bold;")
+        job_hdr.addWidget(self.lbl_jobs)
+        job_hdr.addStretch(1)
+        btn_clear_jobs = QPushButton("Xóa hết job")
+        btn_clear_jobs.setStyleSheet("font-size:11px;")
+        btn_clear_jobs.clicked.connect(self._clear_jobs)
+        job_hdr.addWidget(btn_clear_jobs)
+        layout.addLayout(job_hdr)
+
+        self.job_table = QTableWidget()
+        self.job_table.setColumnCount(5)
+        self.job_table.setHorizontalHeaderLabels(
+            ["Voice ID", "Thư mục", "Ngôn ngữ", "Số file", ""])
+        jh = self.job_table.horizontalHeader()
+        jh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        jh.setSectionResizeMode(1, QHeaderView.Stretch)
+        jh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        jh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        jh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.job_table.setMaximumHeight(130)
+        self.job_table.setAlternatingRowColors(True)
+        layout.addWidget(self.job_table)
 
         # === ROW 3: Actions ===
         actions = QHBoxLayout()
@@ -2815,7 +2853,160 @@ class VoiceTool(QMainWindow):
         self._file_list.clear()
         self.file_table.setRowCount(0)
 
+    # ========================================================
+    # HANG DOI JOB (nhieu thu muc + voice, chay 1 luot)
+    # ========================================================
+    def _scan_txt(self, folder):
+        try:
+            return sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                          if f.lower().endswith(".txt"))
+        except Exception:
+            return []
+
+    def _add_job(self):
+        voice_id = self.voice_input.text().strip()
+        folder = self.folder_input.text().strip()
+        if not voice_id:
+            self._log("Nhập Voice ID trước khi thêm job!")
+            return
+        if not folder or not os.path.isdir(folder):
+            self._log("Chọn thư mục Input hợp lệ trước khi thêm job!")
+            return
+        txts = self._scan_txt(folder)
+        if not txts:
+            self._log(f"Thư mục không có file .txt: {folder}")
+            return
+        job = {"voice_id": voice_id, "folder": folder,
+               "language": self.language_combo.currentData(),
+               "language_txt": self.language_combo.currentText(),
+               "files": txts}
+        self._jobs.append(job)
+        self._add_job_row(job)
+        self._update_jobs_label()
+        # Xoa input de nhap job tiep cho nhanh
+        self.voice_input.clear()
+        self.folder_input.clear()
+
+    def _add_job_row(self, job):
+        r = self.job_table.rowCount()
+        self.job_table.insertRow(r)
+        self.job_table.setItem(r, 0, QTableWidgetItem(job["voice_id"]))
+        self.job_table.setItem(r, 1, QTableWidgetItem(job["folder"]))
+        self.job_table.setItem(r, 2, QTableWidgetItem(job.get("language_txt", "Auto")))
+        n_item = QTableWidgetItem(str(len(job["files"])))
+        n_item.setTextAlignment(Qt.AlignCenter)
+        self.job_table.setItem(r, 3, n_item)
+        btn_del = QPushButton("X")
+        btn_del.setFixedWidth(28)
+        btn_del.setStyleSheet("color:#e74c3c;")
+        btn_del.clicked.connect(lambda _, j=job: self._delete_job(j))
+        self.job_table.setCellWidget(r, 4, btn_del)
+
+    def _delete_job(self, job):
+        if job in self._jobs:
+            self._jobs.remove(job)
+        self._rebuild_job_table()
+
+    def _clear_jobs(self):
+        self._jobs = []
+        self._rebuild_job_table()
+
+    def _rebuild_job_table(self):
+        self.job_table.setRowCount(0)
+        for job in self._jobs:
+            self._add_job_row(job)
+        self._update_jobs_label()
+
+    def _update_jobs_label(self):
+        n = len(self._jobs)
+        if n == 0:
+            self.lbl_jobs.setText(
+                "Danh sách job: 0  (để trống = chạy 1 thư mục hiện tại)")
+        else:
+            tot = sum(len(j["files"]) for j in self._jobs)
+            self.lbl_jobs.setText(
+                f"Danh sách job: {n} thư mục / {tot} file  — bấm START chạy HẾT 1 lượt")
+
+    def _resolve_language(self, language_code, files):
+        """Auto-detect ngon ngu neu language_code None. -> code | None."""
+        if language_code is not None:
+            return language_code
+        try:
+            paths = [fp for _, fp in files] if files and isinstance(files[0], tuple) else list(files)
+            detected = _detect_lang_from_files(paths, max_files=3)
+            if detected:
+                from core.convert import LANGUAGE_NAMES
+                self._log(f"[Lang] Auto-detect: {detected} "
+                          f"({LANGUAGE_NAMES.get(detected, detected)})")
+                return detected
+        except Exception as e:
+            self._log(f"[Lang] Detect lỗi: {str(e)[:60]}")
+        return None
+
+    def _run_job_queue(self):
+        self._job_idx = 0
+        self._stop_queue = False
+        self._job_totals = {"done": 0, "error": 0}
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.lbl_status.setText("Đang chạy hàng đợi...")
+        self._elapsed_timer.start()
+        self._timer.start(1000)
+        self._log(f"=== BẮT ĐẦU HÀNG ĐỢI: {len(self._jobs)} job ===")
+        self._run_next_job()
+
+    def _run_next_job(self):
+        if getattr(self, "_stop_queue", False) or self._job_idx >= len(self._jobs):
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+            self._timer.stop()
+            elapsed = self._elapsed_timer.elapsed() // 1000
+            t = self._job_totals
+            self.lbl_status.setText(
+                f"Xong hàng đợi: {t['done']} OK | {t['error']} lỗi | {elapsed}s")
+            self._log(f"=== XONG HÀNG ĐỢI: {t['done']} OK, {t['error']} lỗi "
+                      f"({self._job_idx}/{len(self._jobs)} job), {elapsed}s ===")
+            self._update_stats()
+            return
+        job = self._jobs[self._job_idx]
+        self._load_folder(job["folder"])   # nap file vao bang de theo doi
+        self._log(f"\n--- Job {self._job_idx+1}/{len(self._jobs)}: "
+                  f"{os.path.basename(job['folder'])} | voice {job['voice_id'][:12]}... "
+                  f"({len(self._file_list)} file) ---")
+        language_code = self._resolve_language(job["language"], self._file_list)
+        self.worker = VoiceWorker(
+            files=list(self._file_list),
+            output_dir=job["folder"],          # MP3 luu ngay trong thu muc job
+            voice_id=job["voice_id"],
+            model_id=self.model_combo.currentText(),
+            stability=self.stability_spin.value() / 100,
+            similarity=self.similarity_spin.value() / 100,
+            speed=self.speed_spin.value(),
+            output_format=self.quality_combo.currentText(),
+            mode=self.mode_combo.currentData(),
+            config=self.config,
+            language_code=language_code,
+        )
+        self.worker.log_signal.connect(self._log)
+        self.worker.file_started.connect(self._on_file_started)
+        self.worker.file_done.connect(self._on_file_done)
+        self.worker.file_error.connect(self._on_file_error)
+        self.worker.all_done.connect(self._on_job_finished)
+        self.worker.start()
+
+    def _on_job_finished(self, done, error):
+        self._job_totals["done"] += done
+        self._job_totals["error"] += error
+        self._job_idx += 1
+        self._run_next_job()
+
     def _start_batch(self):
+        # Neu co job trong hang doi -> chay HET tuan tu
+        if self._jobs:
+            if self.worker and self.worker.isRunning():
+                return
+            self._run_job_queue()
+            return
         if self.worker and self.worker.isRunning():
             return
 
@@ -2881,6 +3072,7 @@ class VoiceTool(QMainWindow):
         self.worker.start()
 
     def _stop_batch(self):
+        self._stop_queue = True   # dung ca hang doi job (khong chay job tiep)
         if self.worker:
             self.worker.cancel()
             self._log("Dang dung...")
