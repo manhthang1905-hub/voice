@@ -198,9 +198,14 @@ class MasterWorkspace:
         goi se probe LO MOI (khong lap lai). Token cache trong pool -> tra ve tuc thi.
         """
         # Nap them ws da CHET/disabled tu roster -> bo qua ngay (khoi probe/thu lai).
+        # + GIOI HAN theo roster: chi dung workspace MAY NAY so huu (chia nhieu may).
+        roster_ids = None
         try:
-            from core.mode_b_accounts import dead_workspace_ids
+            from core.mode_b_accounts import dead_workspace_ids, roster_workspace_ids
             self._disabled |= dead_workspace_ids()
+            r = roster_workspace_ids()
+            if r:                       # co roster -> chi dung ws trong roster
+                roster_ids = r
         except Exception:
             pass
         with self._pool_lock:
@@ -208,7 +213,8 @@ class MasterWorkspace:
                 self._pool = []
             skip = set(self._probed) | set(self._exhausted) | set(self._disabled)
         ids = [w.get("workspace_id") for w in self.list_workspaces()
-               if w.get("workspace_id") and w.get("workspace_id") not in skip]
+               if w.get("workspace_id") and w.get("workspace_id") not in skip
+               and (roster_ids is None or w.get("workspace_id") in roster_ids)]
         found = []
         good = 0
         if ids:

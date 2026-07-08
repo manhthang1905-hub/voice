@@ -49,6 +49,29 @@ def load_accounts():
     return accounts
 
 
+def roster_workspace_ids():
+    """Tap workspace_id cua CAC TK MAY NAY SO HUU (trong roster, khong tinh dead).
+
+    Dung de GIOI HAN pool: master chi generate cac workspace co trong roster may nay
+    -> chia roster giua nhieu may = chia THAT (khong đụng TK cua may khac).
+    Rong -> khong gioi han (dung tat ca workspace cua master, tuong thich cu).
+    """
+    out = set()
+    if not os.path.exists(STATUS_JSON):
+        return out
+    try:
+        data = _load_json_file(STATUS_JSON)
+        for acc in data.get("accounts", []):
+            if acc.get("status") in ("dead", "flagged"):
+                continue
+            w = (acc.get("workspace_id") or "").strip()
+            if w:
+                out.add(w)
+    except Exception:
+        pass
+    return out
+
+
 def dead_workspace_ids():
     """Tap workspace_id cua cac TK da CHET/disabled (roster) -> pool bo qua ngay,
     khong probe/thu lai (bot churn 'TK loi'). Tich luy qua cac phien."""
