@@ -1473,8 +1473,24 @@ class VoiceWorker(QThread):
                             proxy=proxy_dict)
                     except Exception as add_err:
                         new_vid = None
+                        add_err_msg = str(add_err).lower()
                         self.log_signal.emit(
                             f"  Add voice lỗi: {str(add_err)[:60]}")
+                        # Voice KHONG dung duoc cho free users → mark dead NGAY
+                        # (tat ca TK free deu se fail giong nhau, khoi thu them)
+                        if ('free user' in add_err_msg
+                                or 'creator' in add_err_msg
+                                or 'upgrade' in add_err_msg
+                                or 'paid plan' in add_err_msg
+                                or 'not available' in add_err_msg):
+                            self.log_signal.emit(
+                                f"  🚫 Voice {self.voice_id[:16]}..."
+                                f" cần plan trả phí → bỏ qua")
+                            self._dead_voice_ids.add(self.voice_id)
+                            audit("voice_requires_paid_plan",
+                                  voice_id=self.voice_id,
+                                  error=str(add_err)[:100])
+                            return None
 
                     if new_vid:
                         self._track_added_voice(self.voice_id, new_vid)
@@ -1728,31 +1744,20 @@ class VoiceWorker(QThread):
                     or 'paid_plan_required' in emsg_l
                     or 'upgrade' in emsg_l and 'plan' in emsg_l
                     or 'free users cannot' in emsg_l
+                    or 'free user' in emsg_l
+                    or 'not available for free' in emsg_l
                     or 'tier' in emsg_l and ('above' in emsg_l or 'higher' in emsg_l)
                 ):
-                    account_switches += 1
-                    failed_email = self._current_email or ""
+                    # Voice CAN plan tra phi → mark dead NGAY (tat ca TK free deu fail)
                     self.log_signal.emit(
-                        f"  🎫 Voice cần plan cao hơn (TK {failed_email})"
-                        f" → đổi TK [{account_switches}]")
-                    if failed_email:
-                        self._skipped_emails.add(failed_email)
-                    audit("voice_plan_required",
-                          email=failed_email,
+                        f"  🚫 Voice {self.voice_id[:16]}..."
+                        f" cần plan trả phí → bỏ qua")
+                    self._dead_voice_ids.add(self.voice_id)
+                    audit("voice_requires_paid_plan",
                           voice_id=self.voice_id,
                           error=emsg)
                     if self._added_voices:
                         self._cleanup_added_voices()
-                    token, email = self._get_token(need_chars=chunk_chars)
-                    if token:
-                        self._current_token = token
-                        self._current_email = email
-                        self._chars_used = 0
-                        self.log_signal.emit(f"  Thử TK mới: {email}")
-                        continue
-                    self.log_signal.emit(
-                        f"  Voice {self.voice_id[:16]}... cần Creator+ — skip")
-                    self._dead_voice_ids.add(self.voice_id)
                     return None
                 real_retries += 1
                 if (
