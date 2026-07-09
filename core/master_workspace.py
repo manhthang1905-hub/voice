@@ -256,9 +256,9 @@ class MasterWorkspace:
         workspace bi mark_exhausted (het quota/disabled khi convert) se bi bo qua.
         """
         with self._pool_lock:
-            stale = self._pool is not None and (time.time() - self._pool_time > 2400)
+            stale = self._pool is not None and (time.time() - self._pool_time > 900)
             if stale:
-                # >40 phut: token gan het han + TK het quota co the DA RESET.
+                # >15 phut: token gan het han + TK het quota co the DA RESET.
                 # Vut pool + XOA _exhausted (cho probe lai -> TK reset xong quay lai).
                 # GIU _disabled (chet vinh vien, khoi probe lai). -> hop tool 24/7.
                 self._pool = None

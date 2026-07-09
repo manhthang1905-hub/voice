@@ -1518,20 +1518,10 @@ class VoiceWorker(QThread):
 
             except QuotaExceededError:
                 account_switches += 1
-                # Check quota thật
-                real_left = "?"
-                if self._current_token:
-                    try:
-                        q = check_quota(
-                            self._current_token, proxy=None)
-                        if q:
-                            real_left = q["chars_remaining"]
-                    except Exception:
-                        pass
+                # Đã biết hết quota → không cần check_quota() lại (tiết kiệm ~2s/lần)
                 self.log_signal.emit(
                     f"  💰 Hết quota "
-                    f"(dùng ~{self._chars_used:,}, "
-                    f"API còn: {real_left})"
+                    f"(TK {self._current_email or '?'})"
                     f" → đổi TK [{account_switches}]")
                 if self._current_email:
                     if self.mode == "a":
@@ -1692,6 +1682,42 @@ class VoiceWorker(QThread):
                         continue
                     self.log_signal.emit("  Không còn TK!")
                     return None
+                # TOKEN/AUTH KHONG HOP LE → ĐỔI TK NGAY (khong retry cung token hong)
+                if (
+                    'khong hop le' in emsg_l
+                    or 'authorization header was invalid' in emsg_l
+                    or 'provided authorization' in emsg_l
+                    or 'not_authenticated' in emsg_l
+                    or 'invalid api key' in emsg_l
+                    or ('invalid' in emsg_l and ('auth' in emsg_l or 'token' in emsg_l))
+                ):
+                    account_switches += 1
+                    failed_email = self._current_email or ""
+                    self.log_signal.emit(
+                        f"  🔑 Token invalid (TK {failed_email}) → đổi TK"
+                        f" [{account_switches}]")
+                    if failed_email:
+                        self._skipped_emails.add(failed_email)
+                    _bws = getattr(self, '_current_ws_id', "") or ""
+                    if _bws:
+                        try:
+                            self._get_master_pool().mark_bad_workspace(_bws)
+                        except Exception:
+                            pass
+                    audit("token_invalid",
+                          email=failed_email,
+                          error=emsg)
+                    if self._added_voices:
+                        self._cleanup_added_voices()
+                    token, email = self._get_token(need_chars=chunk_chars)
+                    if token:
+                        self._current_token = token
+                        self._current_email = email
+                        self._chars_used = 0
+                        self.log_signal.emit(f"  Thử TK mới: {email}")
+                        continue
+                    self.log_signal.emit("  Không còn TK!")
+                    return None
                 real_retries += 1
                 if (
                     'unusual activity' in emsg_l
@@ -1815,12 +1841,31 @@ class VoiceWorker(QThread):
                 pool = self._get_master_pool()
                 # Onboard (login+invite+accept) lam o nut "Lien ket Master".
                 # O day chon workspace con quota tu BAT KY master nao -> generate.
-                pick = pool.next_workspace(need_chars=need_chars)
-                if not pick:
-                    self.log_signal.emit(
-                        "  Master: hết workspace còn quota! "
-                        "(bấm 'Liên kết Master' để thêm account)")
-                    return None, None
+                # Pre-validate: loop chon workspace, check quota that neu can
+                _prevalidate_tries = 0
+                while _prevalidate_tries < 8:
+                    pick = pool.next_workspace(need_chars=need_chars)
+                    if not pick:
+                        self.log_signal.emit(
+                            "  Master: hết workspace còn quota! "
+                            "(bấm 'Liên kết Master' để thêm account)")
+                        return None, None
+                    m_email, ws_id, scoped_token, remaining = pick
+                    # Neu remaining sat nguong (< 2x can) → check quota THAT tu API
+                    # de tranh vong lap "pick → TTS fail → quota error → pick lai"
+                    if remaining < need_chars * 2:
+                        try:
+                            real_q = check_quota(scoped_token, proxy=None)
+                            if real_q and real_q["chars_remaining"] < need_chars:
+                                self.log_signal.emit(
+                                    f"  ⏭ WS {ws_id[:12]} thật sự hết"
+                                    f" ({real_q['chars_remaining']:,}) → skip")
+                                pool.mark_bad_workspace(ws_id)
+                                _prevalidate_tries += 1
+                                continue
+                        except Exception:
+                            pass  # Network error → dung cached quota
+                    break  # Workspace du quota → dung
                 m_email, ws_id, scoped_token, remaining = pick
                 self._current_api_key = ""
                 self._current_password = ""
