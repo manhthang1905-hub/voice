@@ -2387,21 +2387,30 @@ class MaintenanceWorker(QThread):
 
 
 class PoolWarmerWorker(QThread):
-    """CHUAN BI TRUOC token: nap san pool workspace o NEN -> khi Auto Convert can
-    token la co NGAY, khong phai doi build pool (~50s) giua chung."""
+    """Duy tri DANH SACH TK o nen. 2 che do:
+    - full=False (nhanh): nap 1 it token de dung ngay khi mo tool.
+    - full=True (ra soat): probe LAI TAT CA TK -> danh sach DAY DU + tuoi moi
+      (quota + token). Generation chi doc danh sach nay -> khong bi 'het' oan.
+    """
     log_signal = pyqtSignal(str)
 
-    def __init__(self, target=40):
+    def __init__(self, target=40, full=False):
         super().__init__()
         self.target = target
+        self.full = full
 
     def run(self):
         try:
             from core.master_pool import get_shared_pool
-            n = get_shared_pool().warm(target_ready=self.target)
-            self.log_signal.emit(f"[Pool] San sang {n} token (nap truoc)")
+            pool = get_shared_pool()
+            if self.full:
+                n = pool.refresh_full()
+                self.log_signal.emit(f"[Pool] Ra soat nen: {n} TK san sang (danh sach day du)")
+            else:
+                n = pool.warm(target_ready=self.target)
+                self.log_signal.emit(f"[Pool] San sang {n} token (nap nhanh)")
         except Exception as e:
-            self.log_signal.emit(f"[Pool] warm loi: {str(e)[:80]}")
+            self.log_signal.emit(f"[Pool] loi: {str(e)[:80]}")
 
 
 class VoiceTool(QMainWindow):
@@ -3325,29 +3334,38 @@ def main():
     # Chay 1 lan ~5 phut sau khi mo tool (sau khi recover master xong)
     QTimer.singleShot(300000, _maybe_maintenance)
 
-    # === CHUAN BI TRUOC TOKEN (pool warmer): nap san token o nen ===
-    def _warm_pool():
+    # === DUY TRI DANH SACH TK O NEN ===
+    # - Nap nhanh luc mo (co token ngay).
+    # - RA SOAT DAY DU (probe TAT CA TK) o nen dinh ky -> danh sach luon day du +
+    #   tuoi moi -> generation chi doc, khong bao gio 'het' oan.
+    def _run_warmer(full):
         w = getattr(window, "_pool_warmer", None)
         if w and w.isRunning():
             return
-        window._pool_warmer = PoolWarmerWorker(target=40)
+        window._pool_warmer = PoolWarmerWorker(target=40, full=full)
         window._pool_warmer.log_signal.connect(lambda m: log.info(m))
         window._pool_warmer.start()
 
+    def _full_refresh():
+        _run_warmer(full=True)
+
     def _topup_pool():
-        # Nap them khi token san sang xuong thap -> luon co san truoc khi can
         try:
             from core.master_pool import shared_pool_ready
             r = shared_pool_ready()
-            if 0 <= r < 15:
-                _warm_pool()
+            if 0 <= r < 15:           # tut thap -> nap nhanh de khong dut
+                _run_warmer(full=False)
         except Exception:
             pass
 
-    QTimer.singleShot(8000, _warm_pool)          # nap truoc ~8s sau khi mo tool
+    QTimer.singleShot(8000, lambda: _run_warmer(full=False))   # nap nhanh ~8s
+    QTimer.singleShot(45000, _full_refresh)                    # ra soat day du ~45s
     window._warm_timer = QTimer()
     window._warm_timer.timeout.connect(_topup_pool)
-    window._warm_timer.start(90000)              # kiem tra top-up moi 90s
+    window._warm_timer.start(90000)                            # top-up moi 90s
+    window._full_timer = QTimer()
+    window._full_timer.timeout.connect(_full_refresh)
+    window._full_timer.start(20 * 60 * 1000)                   # ra soat day du moi 20 phut
 
     sys.exit(app.exec_())
 

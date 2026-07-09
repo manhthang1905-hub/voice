@@ -20,6 +20,21 @@ if sys.stdout is None or sys.stderr is None:
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# === AN CUA SO CMD cua MOI subprocess (ffmpeg qua pydub, net use, powershell...) ===
+# Windows: mac dinh subprocess mo cua so console -> nhay len rat phien khi ghep voice.
+# Patch Popen them CREATE_NO_WINDOW -> chay an hoan toan.
+if os.name == "nt":
+    import subprocess as _sp
+    _CREATE_NO_WINDOW = 0x08000000
+    _orig_popen_init = _sp.Popen.__init__
+
+    def _popen_init(self, *args, **kwargs):
+        if kwargs.get("creationflags", 0) == 0:
+            kwargs["creationflags"] = _CREATE_NO_WINDOW
+        _orig_popen_init(self, *args, **kwargs)
+
+    _sp.Popen.__init__ = _popen_init
+
 
 if __name__ == "__main__":
     # Bat moi loi Python khong xu ly duoc -> ghi log ra file

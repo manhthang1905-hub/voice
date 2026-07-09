@@ -121,11 +121,8 @@ class MasterPool:
         return n
 
     def warm(self, target_ready=40):
-        """CHUAN BI TRUOC: nap san token cho toi khi co >= target_ready token san sang
-        (build pool cua tung master song, dung khi du). -> so token san sang.
-
-        Goi nen luc mo tool + dinh ky -> khi Auto Convert can token la co NGAY,
-        khong phai doi build pool (~50s) giua chung.
+        """CHUAN BI TRUOC (nhanh): nap token cho toi khi co >= target_ready san sang.
+        Dung khi mo tool de co token ngay. Danh sach DAY DU do refresh_full lo.
         """
         total = 0
         for email, mw in list(self._mw.items()):
@@ -138,6 +135,22 @@ class MasterPool:
                 self._handle_master_error(email, e)
             if total >= target_ready:
                 break
+        return total
+
+    def refresh_full(self):
+        """RA SOAT NEN: probe LAI TAT CA workspace cua moi master -> danh sach TK
+        DAY DU + tuoi moi (quota + token). Generation chi doc danh sach nay -> khong
+        bao gio bi 'het' oan (da co san toan bo TK quota cao). -> tong so san sang.
+        """
+        total = 0
+        for email, mw in list(self._mw.items()):
+            if email in self._dead:
+                continue
+            try:
+                mw.rebuild_full()
+                total += mw.ready_count()
+            except Exception as e:
+                self._handle_master_error(email, e)
         return total
 
     def mark_bad_workspace(self, ws_id):

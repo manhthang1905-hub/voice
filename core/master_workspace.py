@@ -190,12 +190,13 @@ class MasterWorkspace:
         return (r if r > 0 else 9_000_000_000_000, -entry.get("remaining", 0))
 
     def build_pool(self, max_workers: int = 20, enough: int = 30,
-                   min_remaining: int = 500) -> list:
-        """Probe THEM workspace SONG SONG -> BO SUNG vao pool (sort remaining giam dan).
+                   min_remaining: int = 500, full: bool = False) -> list:
+        """Probe THEM workspace SONG SONG -> BO SUNG vao pool (sort EDF).
 
-        Toi uu: DUNG SOM khi tim du `enough` workspace con quota (>= min_remaining)
-        thay vi probe HET vai tram ws (~2 phut). Bo qua ws da probe/exhausted -> moi lan
-        goi se probe LO MOI (khong lap lai). Token cache trong pool -> tra ve tuc thi.
+        full=True -> probe HET (danh sach day du, cho background scan).
+        full=False -> DUNG SOM khi du `enough` TK >= min_remaining (nhanh, on-demand).
+        Bo qua ws da probe/exhausted/disabled -> moi lan probe LO MOI (khong lap).
+        Token cache trong pool -> next_workspace tra ve tuc thi.
         """
         # Nap them ws da CHET/disabled tu roster -> bo qua ngay (khoi probe/thu lai).
         # + GIOI HAN theo roster: chi dung workspace MAY NAY so huu (chia nhieu may).
@@ -228,13 +229,23 @@ class MasterWorkspace:
                             found.append(r)
                             if r["remaining"] >= min_remaining:
                                 good += 1
-                    if good >= enough:
+                    if not full and good >= enough:
                         break
         with self._pool_lock:
             self._pool.extend(found)
             self._pool.sort(key=self._edf_key)   # EDF: reset som nhat truoc
             self._pool_time = time.time()
             return list(self._pool)
+
+    def rebuild_full(self):
+        """LAM MOI danh sach TK day du: vut pool cu, probe LAI TAT CA workspace
+        (quota + token moi). Giu _disabled (chet vinh vien). Dung cho background scan
+        dinh ky -> generation luon co danh sach day du, tuoi moi."""
+        with self._pool_lock:
+            self._pool = None
+            self._probed = set()
+            self._exhausted = set()      # reset xong TK quay lai
+        return self.build_pool(full=True)
 
     def next_workspace(self, need_chars: int = 500):
         """Tra ve (workspace_id, scoped_token, remaining) — workspace con nhieu quota
