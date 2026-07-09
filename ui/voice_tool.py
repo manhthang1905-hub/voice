@@ -1718,6 +1718,42 @@ class VoiceWorker(QThread):
                         continue
                     self.log_signal.emit("  Không còn TK!")
                     return None
+                # VOICE CAN PLAN CAO HON (Creator+) → DOI TK hoac skip voice
+                # Error "creator tier or above" tu ElevenLabsError 400 khong duoc
+                # convert thanh VoiceRestrictedError → roi vao day. Doi TK; neu
+                # het TK thi danh dau voice dead.
+                if (
+                    'creator' in emsg_l
+                    or 'paid plan' in emsg_l
+                    or 'paid_plan_required' in emsg_l
+                    or 'upgrade' in emsg_l and 'plan' in emsg_l
+                    or 'free users cannot' in emsg_l
+                    or 'tier' in emsg_l and ('above' in emsg_l or 'higher' in emsg_l)
+                ):
+                    account_switches += 1
+                    failed_email = self._current_email or ""
+                    self.log_signal.emit(
+                        f"  🎫 Voice cần plan cao hơn (TK {failed_email})"
+                        f" → đổi TK [{account_switches}]")
+                    if failed_email:
+                        self._skipped_emails.add(failed_email)
+                    audit("voice_plan_required",
+                          email=failed_email,
+                          voice_id=self.voice_id,
+                          error=emsg)
+                    if self._added_voices:
+                        self._cleanup_added_voices()
+                    token, email = self._get_token(need_chars=chunk_chars)
+                    if token:
+                        self._current_token = token
+                        self._current_email = email
+                        self._chars_used = 0
+                        self.log_signal.emit(f"  Thử TK mới: {email}")
+                        continue
+                    self.log_signal.emit(
+                        f"  Voice {self.voice_id[:16]}... cần Creator+ — skip")
+                    self._dead_voice_ids.add(self.voice_id)
+                    return None
                 real_retries += 1
                 if (
                     'unusual activity' in emsg_l
