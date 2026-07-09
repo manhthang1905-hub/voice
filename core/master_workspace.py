@@ -257,10 +257,10 @@ class MasterWorkspace:
         if need_build:
             self.build_pool()
 
-        # BIEN AN TOAN: quota trong pool la uoc luong (doc luc build, co the da lech
-        # do TK bi dung o cho khac). Chi chon TK con DU THOAI MAI (need + buffer) ->
-        # tranh "bao con X nhung het quota" -> bot churn doi TK. Buffer = 20% or 1500.
-        buffer = max(1500, int(need_chars * 0.2))
+        # BIEN AN TOAN nho: quota pool la uoc luong (co the lech nhe do dung cho khac).
+        # Buffer nho (10% or 500) de tranh chon TK sat nguong; KHONG lon qua keo loc
+        # nham ca TK dung duoc.
+        buffer = max(500, int(need_chars * 0.1))
         need_safe = need_chars + buffer
 
         def _pick():
@@ -277,9 +277,10 @@ class MasterWorkspace:
         pick = _pick()
         if pick:
             return pick
-        # Pool hien tai het workspace dung duoc -> build_pool DUNG SOM nen con nhieu ws
-        # chua probe. Build lai (probe them lo tiep, bo qua ws da exhausted) roi thu lai.
-        self.build_pool()
+        # Pool hien tai KHONG co TK du quota -> build_pool DUNG SOM (min 500) nen co the
+        # toan TK quota thap. Probe THEM, NHAM TK du quota (min_remaining = need_safe) ->
+        # tim TK quota cao (thuong con nhieu) thay vi bao "het workspace" oan.
+        self.build_pool(min_remaining=need_safe, enough=15)
         return _pick()
 
     def ready_count(self) -> int:

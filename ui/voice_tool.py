@@ -369,7 +369,7 @@ class VoiceWorker(QThread):
                                 self, '_tk_quota', 10000) - self._chars_used
                             mult = getattr(self, '_credit_multiplier', 1)
                             need_credits = chunk_chars * mult
-                            buffer = max(1500, int(need_credits * 0.2))
+                            buffer = max(500, int(need_credits * 0.1))
                             need_new = (not self._current_token
                                         or tk_remaining < need_credits + buffer)
 
