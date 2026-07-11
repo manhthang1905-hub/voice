@@ -103,11 +103,18 @@ class MasterWorkspace:
     def list_workspaces(self) -> list:
         """Danh sach workspace master tham gia: [{workspace_id, seat_type, num_members}]."""
         tok = self.master_token()
-        r = self.session.get(
-            f"{API_BASE}/v1/auth-account/workspace-users",
-            headers=self._headers(tok), timeout=20)
-        r.raise_for_status()
-        return r.json()
+        # 300+ workspace → can timeout lon + retry de tranh mark dead oan.
+        for attempt in range(3):
+            try:
+                r = self.session.get(
+                    f"{API_BASE}/v1/auth-account/workspace-users",
+                    headers=self._headers(tok), timeout=60)
+                r.raise_for_status()
+                return r.json()
+            except Exception:
+                if attempt == 2:
+                    raise
+                import time as _t; _t.sleep(2)
 
     def member_workspace_ids(self) -> set:
         """Tap workspace_id ma master DANG la member (de check account ready)."""
@@ -247,18 +254,27 @@ class MasterWorkspace:
             self._exhausted = set()      # reset xong TK quay lai
         return self.build_pool(full=True)
 
+    def _validate_quota_real(self, workspace_id: str, token: str) -> int:
+        """CHECK quota THAT cua 1 workspace (real-time, < 1s). -> remaining hoac -1 (loi)."""
+        try:
+            q = self.workspace_quota(token)
+            return q["remaining"]
+        except Exception:
+            return -1
+
     def next_workspace(self, need_chars: int = 500):
         """Tra ve (workspace_id, scoped_token, remaining) — workspace con nhieu quota
         nhat va >= need_chars. None neu het.
 
+        PRE-VALIDATE quota THAT truoc khi tra ve -> KHONG BAO GIO tra TK het quota oan.
         Dung pool probe-song-song + cache: lan dau build_pool (~vai giay cho vai tram
         workspace), cac lan sau tra ve tuc thi. Quota da dung duoc tru dan trong pool;
         workspace bi mark_exhausted (het quota/disabled khi convert) se bi bo qua.
         """
         with self._pool_lock:
-            stale = self._pool is not None and (time.time() - self._pool_time > 900)
+            stale = self._pool is not None and (time.time() - self._pool_time > 300)
             if stale:
-                # >15 phut: token gan het han + TK het quota co the DA RESET.
+                # >5 phut (giam tu 15 phut): token gan het han + TK het quota co the DA RESET.
                 # Vut pool + XOA _exhausted (cho probe lai -> TK reset xong quay lai).
                 # GIU _disabled (chet vinh vien, khoi probe lai). -> hop tool 24/7.
                 self._pool = None
@@ -281,8 +297,20 @@ class MasterWorkspace:
                     if ws in self._exhausted or ws in self._disabled:
                         continue
                     if entry["remaining"] >= need_safe:
-                        entry["remaining"] -= need_chars   # tru quota uoc luong da dung
-                        return (ws, entry["token"], entry["remaining"] + need_chars)
+                        # PRE-VALIDATE: check quota THAT truoc khi tra ve
+                        real_remaining = self._validate_quota_real(ws, entry["token"])
+                        if real_remaining < 0:
+                            # Token invalid/loi -> danh dau exhausted, thu TK khac
+                            self._exhausted.add(ws)
+                            continue
+                        if real_remaining < need_safe:
+                            # Quota that su thap hon cache -> cap nhat + danh dau exhausted
+                            entry["remaining"] = real_remaining
+                            self._exhausted.add(ws)
+                            continue
+                        # Quota OK -> cap nhat real + tru usage
+                        entry["remaining"] = real_remaining - need_chars
+                        return (ws, entry["token"], real_remaining)
             return None
 
         pick = _pick()
@@ -316,6 +344,28 @@ class MasterWorkspace:
     def mark_disabled(self, workspace_id: str):
         """TK bi vo hieu hoa/ban (VINH VIEN) -> khong bao gio probe/dung lai."""
         self._disabled.add(workspace_id)
+
+    def health_check(self) -> tuple:
+        """Kiem tra suc khoe master: refresh token -> (ok: bool, msg: str).
+
+        Dung de phat hien master chet TRUOC KHI generate (tiet kiem thoi gian retry).
+        Goi dinh ky (5-10 phut) tu background worker.
+        """
+        try:
+            tok = self.master_token()
+            # Thu list workspaces (call nhe) de verify token OK
+            self.list_workspaces()
+            return True, "ok"
+        except Exception as e:
+            err = str(e).lower()
+            if any(k in err for k in ("invalid_grant", "token_expired",
+                                       "invalid_refresh_token", "user_disabled")):
+                return False, "token_expired"
+            if any(k in err for k in ("suspended", "banned", "terminated",
+                                       "account_suspended")):
+                return False, "suspended"
+            # Loi mang/tam thoi
+            return None, f"network:{str(e)[:60]}"
 
     # ---------- onboard (sync) account moi ----------
     def invite_master(self, worker_token: str) -> tuple:

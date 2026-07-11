@@ -55,15 +55,15 @@ class MasterPool:
 
     def _handle_master_error(self, email, err):
         """Master loi khi refresh/next_workspace/generate -> phan loai + persist."""
-        self._dead.add(email)
         kind = self._classify_death(err)
         if kind:
-            # Chet that -> luu vao file (status suspended/expired), phien sau tu bo qua
-            # + BI LOAI khoi live -> TK cua no tu re-link sang master song khac.
+            # Chet that (suspended/expired) -> danh dau dead + luu file
+            self._dead.add(email)
             try:
                 masters_store.mark_expired(email, str(err)[:150], status=kind)
             except Exception:
                 pass
+        # Loi tam thoi (timeout/mang) -> KHONG danh dead, lan sau thu lai
 
     def is_alive(self, email):
         """Master con song? Refresh token OK VA account chua bi suspend.
@@ -91,6 +91,35 @@ class MasterPool:
                 return False
             # Loi khac (mang/quyen) -> coi nhu con song (refresh da OK)
             return True
+
+    def health_check_all(self, on_log=lambda *_: None):
+        """Kiem tra suc khoe TAT CA master (background, 5-10 phut/lan).
+
+        Phat hien + loai master chet TRUOC KHI generate -> tiet kiem retry.
+        -> dict {ok: [emails], dead: [emails], unknown: [emails]}
+        """
+        result = {"ok": [], "dead": [], "unknown": []}
+        for email, mw in list(self._mw.items()):
+            if email in self._dead:
+                continue
+            ok, msg = mw.health_check()
+            if ok is True:
+                result["ok"].append(email)
+            elif ok is False:
+                # Master chet -> mark + persist
+                self._handle_master_error(email, Exception(msg))
+                result["dead"].append(email)
+                on_log(f"[HealthCheck] Master {email} CHET: {msg}")
+            else:
+                # Loi tam thoi (mang)
+                result["unknown"].append(email)
+        return result
+
+    def auto_remove_dead_masters(self):
+        """Loai bo master da chet khoi pool (tu _dead set). Goi sau health_check."""
+        for email in list(self._dead):
+            if email in self._mw:
+                del self._mw[email]
 
     def live_masters(self):
         """Danh sach (email, MasterWorkspace) con song."""
