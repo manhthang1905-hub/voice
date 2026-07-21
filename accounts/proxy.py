@@ -342,23 +342,37 @@ class Proxy4G:
             ph = proxies[0]
             running = ph.get("proxy_running", False)
             ip = (ph.get("current_4g_ip") or "").strip()
+            # API bao san sang -> VAN test LUONG THAT (API co the bao OK nhung socks5 reset)
             if running and ip:
-                return True   # san sang
-            # Chua san sang -> thu start + scan (khong bao chet ngay)
-            on_log(f"  ⚠ 4G chua san sang (running={running}) -> start + scan...")
+                if self.probe_socks5():
+                    return True
+                on_log("  ⚠ 4G: API bao OK nhung luong socks5 RESET -> restart forward...")
+            else:
+                on_log(f"  ⚠ 4G chua san sang (running={running}) -> start + scan...")
+            # Restart forward (start + scan) roi test lai
             try:
                 req.post(f"{API_BASE}/proxy/{ph['id']}/start?key={API_KEY}", timeout=10)
             except Exception:
                 pass
             self.scan_devices()
             time.sleep(3)
-            # Re-check sau scan
-            info2 = self.get_info()
-            px2 = info2.get("proxies", info2.get("devices", []))
-            if px2 and px2[0].get("proxy_running") and (px2[0].get("current_4g_ip") or "").strip():
-                on_log(f"  ✓ 4G song lai sau scan (IP {px2[0].get('current_4g_ip')})")
+            if self.probe_socks5():
+                on_log(f"  ✓ 4G luong thong lai sau scan (IP {self.get_ip()})")
                 return True
         return False
+
+    def probe_socks5(self, timeout: int = 12) -> bool:
+        """TEST LUONG THAT: gui 1 request nho qua socks5 :10001 -> True neu di duoc.
+
+        Khac get_ip() (chi hoi API server) — cai nay test forward THAT su den internet.
+        Bat duoc truong hop 'API bao OK nhung socks5 reset' (ConnectionReset 10054).
+        """
+        try:
+            r = req.get("http://api.ipify.org", proxies=self.get_for_requests(),
+                        timeout=timeout)
+            return r.status_code == 200 and len(r.text) >= 7
+        except Exception:
+            return False
 
     def test_device(self, device: str) -> dict:
         """Test 1 device (IP, latency)."""

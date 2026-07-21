@@ -219,6 +219,28 @@ class ModeCEngine:
     def current_ip(self):
         return self._cur_ip
 
+    def recover_4g(self):
+        """Luong socks5 4G reset (ConnectionReset) -> scan/reconnect. Thread-safe +
+        chong spam: nhieu slot cung loi chi scan 1 lan trong 15s.
+        """
+        if not self._p4g:
+            return
+        now = time.time()
+        with self._rotate_lock:
+            if now - getattr(self, "_last_recover", 0) < 15:
+                return   # vua recover xong -> khoi lam lai
+            self._last_recover = now
+            try:
+                ok = self._p4g.ensure_alive(on_log=self.on_log)
+                if ok:
+                    self._cur_ip = self._p4g.get_ip() or self._cur_ip
+                    self.on_log(f"  ✓ 4G reconnect OK (IP {self._cur_ip})")
+                else:
+                    self.on_log("  ⚠ 4G VAN chua thong sau scan — kiem tra tab '4G Proxy' "
+                                "(dien thoai/ADB/EveryProxy)")
+            except Exception as e:
+                self.on_log(f"  ⚠ recover 4G loi: {str(e)[:60]}")
+
     def cancel(self):
         self._cancelled = True
 
@@ -436,12 +458,23 @@ class _BrowserSlot:
                 msg = str(e).lower()
                 if "text_too_long" in msg or "validation" in msg:
                     raise    # loi that su -> khong retry
-                # network/timeout/401 tam thoi -> retry ngan
                 last_err = e
                 self.engine.stat["retries"] += 1
-                self.engine.on_log(f"  ⚠ slot{self.slot_id} {tag}: loi tam ({str(e)[:70]}) "
-                                   f"-> thu lai ({attempt+1}/{MAX_CHUNK_ATTEMPTS})")
-                time.sleep(2)
+                # LOI KET NOI PROXY 4G (ConnectionReset/aborted/timeout socks5): luong 4G
+                # hong, KHONG phai loi IP -> retry mu vo ich. Thu SCAN/reconnect 4G.
+                is_conn = any(k in msg for k in (
+                    "connection aborted", "connectionreset", "10054", "connection reset",
+                    "socks", "max retries", "timed out", "connectionpool"))
+                if is_conn:
+                    self.engine.on_log(f"  🔌 slot{self.slot_id} {tag}: LOI KET NOI 4G "
+                                       f"(luong socks5 reset) -> scan/reconnect 4G "
+                                       f"({attempt+1}/{MAX_CHUNK_ATTEMPTS})")
+                    self.engine.recover_4g()
+                    time.sleep(3)
+                else:
+                    self.engine.on_log(f"  ⚠ slot{self.slot_id} {tag}: loi tam ({str(e)[:70]}) "
+                                       f"-> thu lai ({attempt+1}/{MAX_CHUNK_ATTEMPTS})")
+                    time.sleep(2)
         self.engine.stat["chunk_fail"] += 1
         raise Exception(f"slot{self.slot_id} {tag}: FAIL sau {MAX_CHUNK_ATTEMPTS} lan: {str(last_err)[:100]}")
 
