@@ -2520,6 +2520,66 @@ class PoolWarmerWorker(QThread):
             self.log_signal.emit(f"[Pool] loi: {str(e)[:80]}")
 
 
+class ModeCVoiceWorker(QThread):
+    """Worker cho Voice Convert khi chon MODE C (anonymous, khong master).
+
+    Bao ModeCEngine + generate_file. Phat cung signals nhu VoiceWorker de UI dung chung.
+    Ben bi: 1 file loi -> bo qua (checkpoint giu chunk xong), lam file khac.
+    """
+    log_signal = pyqtSignal(str)
+    file_started = pyqtSignal(int, str)
+    file_progress = pyqtSignal(int, int, int)
+    file_done = pyqtSignal(int, str, int)
+    file_error = pyqtSignal(int, str)
+    all_done = pyqtSignal(int, int)
+
+    def __init__(self, files, output_dir, voice_id, model_id,
+                 config, language_code=None, n_browsers=3):
+        super().__init__()
+        self.files = files                 # [(idx, filepath)]
+        self.output_dir = output_dir
+        self.voice_id = voice_id
+        self.model_id = model_id or "eleven_v3"
+        self.config = config
+        self.language_code = language_code or "vi"
+        self.n_browsers = n_browsers
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        from core.mode_c_engine import ModeCEngine, generate_file, kill_orphan_browsers
+        kill_orphan_browsers()
+        engine = ModeCEngine(
+            voice_id=self.voice_id, model_id=self.model_id,
+            language_code=self.language_code,
+            use_4g=True, n_browsers=self.n_browsers, headless=True,
+            on_log=lambda m: self.log_signal.emit(m))
+        done = 0
+        error = 0
+        for file_idx, filepath in self.files:
+            if self._cancelled:
+                break
+            fname = os.path.basename(filepath)
+            self.file_started.emit(file_idx, fname)
+            try:
+                out = generate_file(engine, filepath, self.output_dir)
+                size = os.path.getsize(out) if out and os.path.exists(out) else 0
+                self.file_done.emit(file_idx, out or "", size)
+                done += 1
+            except Exception as e:
+                self.file_error.emit(file_idx, str(e)[:120])
+                self.log_signal.emit(f"  ⚠ {fname}: loi ({str(e)[:80]}) -> bo qua")
+                error += 1
+        try:
+            engine.cancel()
+            kill_orphan_browsers()
+        except Exception:
+            pass
+        self.all_done.emit(done, error)
+
+
 class VoiceTool(QMainWindow):
 
     def __init__(self):
@@ -2634,9 +2694,10 @@ class VoiceTool(QMainWindow):
         ml.setContentsMargins(6, 18, 6, 6)
 
         self.mode_combo = QComboBox()
+        self.mode_combo.addItem("🆕 Mode C - Anonymous (KHÔNG cần tài khoản + 4G)", "c")
         self.mode_combo.addItem("Mode A - Browser (auto accounts)", "a")
         self.mode_combo.addItem("Mode B - API (Firebase login)", "b")
-        self.mode_combo.setCurrentIndex(1)  # Default Mode B
+        self.mode_combo.setCurrentIndex(0)  # Default Mode C (anonymous)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_change)
         ml.addWidget(self.mode_combo)
 
@@ -3090,19 +3151,31 @@ class VoiceTool(QMainWindow):
                   f"{os.path.basename(job['folder'])} | voice {job['voice_id'][:12]}... "
                   f"({len(self._file_list)} file) ---")
         language_code = self._resolve_language(job["language"], self._file_list)
-        self.worker = VoiceWorker(
-            files=list(self._file_list),
-            output_dir=job["folder"],          # MP3 luu ngay trong thu muc job
-            voice_id=job["voice_id"],
-            model_id=self.model_combo.currentText(),
-            stability=self.stability_spin.value() / 100,
-            similarity=self.similarity_spin.value() / 100,
-            speed=self.speed_spin.value(),
-            output_format=self.quality_combo.currentText(),
-            mode=self.mode_combo.currentData(),
-            config=self.config,
-            language_code=language_code,
-        )
+        mode = self.mode_combo.currentData()
+        if mode == "c":
+            self.worker = ModeCVoiceWorker(
+                files=list(self._file_list),
+                output_dir=job["folder"],
+                voice_id=job["voice_id"],
+                model_id=self.model_combo.currentText(),
+                config=self.config,
+                language_code=language_code,
+                n_browsers=int(self.config.get("mode_c_browsers", 3)),
+            )
+        else:
+            self.worker = VoiceWorker(
+                files=list(self._file_list),
+                output_dir=job["folder"],          # MP3 luu ngay trong thu muc job
+                voice_id=job["voice_id"],
+                model_id=self.model_combo.currentText(),
+                stability=self.stability_spin.value() / 100,
+                similarity=self.similarity_spin.value() / 100,
+                speed=self.speed_spin.value(),
+                output_format=self.quality_combo.currentText(),
+                mode=mode,
+                config=self.config,
+                language_code=language_code,
+            )
         self.worker.log_signal.connect(self._log)
         self.worker.file_started.connect(self._on_file_started)
         self.worker.file_done.connect(self._on_file_done)
@@ -3159,19 +3232,30 @@ class VoiceTool(QMainWindow):
             except Exception as det_err:
                 self._log(f"[Lang] Detect loi: {str(det_err)[:60]}")
 
-        self.worker = VoiceWorker(
-            files=list(self._file_list),
-            output_dir=output_dir,
-            voice_id=voice_id,
-            model_id=self.model_combo.currentText(),
-            stability=self.stability_spin.value() / 100,
-            similarity=self.similarity_spin.value() / 100,
-            speed=self.speed_spin.value(),
-            output_format=self.quality_combo.currentText(),
-            mode=mode,
-            config=self.config,
-            language_code=language_code,
-        )
+        if mode == "c":
+            self.worker = ModeCVoiceWorker(
+                files=list(self._file_list),
+                output_dir=output_dir,
+                voice_id=voice_id,
+                model_id=self.model_combo.currentText(),
+                config=self.config,
+                language_code=language_code,
+                n_browsers=int(self.config.get("mode_c_browsers", 3)),
+            )
+        else:
+            self.worker = VoiceWorker(
+                files=list(self._file_list),
+                output_dir=output_dir,
+                voice_id=voice_id,
+                model_id=self.model_combo.currentText(),
+                stability=self.stability_spin.value() / 100,
+                similarity=self.similarity_spin.value() / 100,
+                speed=self.speed_spin.value(),
+                output_format=self.quality_combo.currentText(),
+                mode=mode,
+                config=self.config,
+                language_code=language_code,
+            )
 
         self.worker.log_signal.connect(self._log)
         self.worker.file_started.connect(self._on_file_started)
@@ -3234,6 +3318,21 @@ class VoiceTool(QMainWindow):
 
     def _update_stats(self):
         mode = self.mode_combo.currentData()
+        if mode == "c":
+            # Mode C: khong can TK. Hien trang thai 4G + so Chrome.
+            try:
+                from accounts.proxy import Proxy4G
+                ip = Proxy4G().get_ip() or "?"
+            except Exception:
+                ip = "?"
+            nb = int(self.config.get("mode_c_browsers", 3))
+            self.lbl_mode_info.setText(
+                f"🆕 Mode C (anonymous) | IP 4G: {ip} | tối đa {nb} Chrome")
+            try:
+                self.lbl_mode_status.setText(f"Mode C | IP {ip}")
+            except Exception:
+                pass
+            return
         if mode == "a":
             try:
                 from accounts.bridge import get_ready_accounts, get_stats
