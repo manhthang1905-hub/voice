@@ -188,6 +188,25 @@ class ModeCEngine:
     def cancel(self):
         self._cancelled = True
 
+    def start_file(self, n_chunks: int):
+        """Goi DAU moi file: dam bao file lam TRON tren 1 IP (khong dut giua chung).
+
+        Neu ngan sach IP CON LAI khong du cho ca file (ma file vua trong 1 IP) -> xoay
+        IP MOI ngay tu dau. -> file khong bao gio bi 'lam do roi het IP' giua chung.
+        (File > 16 chunk khong the vua 1 IP -> van xoay giua chung, nhung checkpoint lo.)
+        """
+        if not self.use_4g:
+            return
+        with self._budget_lock:
+            remaining = IP_REQUEST_BUDGET - self._ip_used
+            need = min(n_chunks, IP_REQUEST_BUDGET)   # file lon: can it nhat full 1 IP
+            if remaining < need:
+                self.on_log(
+                    f"🆕 [4G] File can {n_chunks} chunk, IP hien tai chi con {remaining} req "
+                    f"-> xoay IP MOI de lam tron file (moi voice/file 1 IP sach)")
+                self.rotate_ip(self._ip_generation)
+                self._ip_used = 0
+
     def acquire_ip_slot(self, seen_generation: int):
         """Xin 1 'suat' request tren IP hien tai. Neu IP da dung >= budget -> xoay truoc.
 
@@ -452,6 +471,8 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
                   f"({done_before} da co, {len(todo)} can lam), {n_slots} Chrome song song")
 
     if todo:
+        # DAM BAO file lam tron tren 1 IP (moi voice/file 1 IP sach) -> khong dut giua chung
+        engine.start_file(len(todo))
         q = queue.Queue()
         for i in todo:
             q.put((i, chunks[i]))
