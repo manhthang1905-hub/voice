@@ -142,6 +142,40 @@ MAX_CHUNK_ATTEMPTS = 6
 # Cooldown giua 2 lan xoay IP (giay) — tranh xoay lien tuc khi nhieu thread cung flag
 ROTATE_COOLDOWN = 8
 
+# Tai nguyen 1 Camoufox chiem (uoc tinh de tinh so Chrome linh hoat)
+RAM_PER_CHROME_MB = 350       # RAM 1 Camoufox (~250-350MB) + buffer
+RAM_KEEP_FREE_MB = 3000       # chua lai cho he thong (khong an het RAM)
+
+
+def auto_browser_count(n_chunks: int, cfg_max: int, on_log=lambda *_: None) -> int:
+    """Tinh so Chrome TOI UU theo tai nguyen may LUC NAY + so chunk + tran cau hinh.
+
+    Muc dich: may khoe/ranh -> nhieu Chrome (nhanh); may yeu/ban -> it lai (khong treo).
+    - RAM: moi Chrome ~350MB, chua lai 3GB cho he thong.
+    - CPU: khong vuot so core (mint token ton CPU) va chua 2 core cho he thong.
+    - Khong bao gio nhieu hon so chunk (thua Chrome vo ich).
+    - Khong vuot tran nguoi dung dat (cfg_max).
+    -> so Chrome (>=1).
+    """
+    hard_max = max(1, int(cfg_max))
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        free_mb = vm.available / (1024 * 1024)
+        by_ram = int((free_mb - RAM_KEEP_FREE_MB) / RAM_PER_CHROME_MB)
+        cores = psutil.cpu_count(logical=True) or 4
+        cpu_busy = psutil.cpu_percent(interval=0.5)   # % dang dung
+        # CPU con ranh -> cho nhieu Chrome; ban -> it lai
+        by_cpu = int((cores - 2) * (1 - cpu_busy / 100.0)) + 1
+        n = min(hard_max, n_chunks, max(1, by_ram), max(1, by_cpu))
+        n = max(1, n)
+        on_log(f"⚙ [Auto] {n} Chrome (RAM trong {free_mb/1024:.1f}GB->{by_ram}, "
+               f"CPU {cpu_busy:.0f}%->{by_cpu}, chunk {n_chunks}, tran {hard_max})")
+        return n
+    except Exception:
+        # Khong co psutil -> dung min(tran, chunk)
+        return max(1, min(hard_max, n_chunks))
+
 
 class ModeCEngine:
     """Quan ly pool nhieu Chrome + 1 4G chung, xoay IP khi flag."""
@@ -466,7 +500,9 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
             todo.append(i)
 
     done_before = len(chunks) - len(todo)
-    n_slots = min(engine.n_browsers, max(1, len(todo)))
+    # So Chrome LINH HOAT theo tai nguyen may LUC NAY (RAM/CPU) + so chunk + tran cau hinh.
+    # -> may khoe/ranh chay nhieu Chrome (nhanh), may yeu/ban it lai (khong treo).
+    n_slots = auto_browser_count(max(1, len(todo)), engine.n_browsers, on_log=engine.on_log)
     engine.on_log(f"[ModeC] {base}: {len(text):,} chars -> {len(chunks)} chunk "
                   f"({done_before} da co, {len(todo)} can lam), {n_slots} Chrome song song")
 

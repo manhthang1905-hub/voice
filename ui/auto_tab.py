@@ -533,10 +533,11 @@ class AutoSettingsDialog(QDialog):
         self.sp_mode_c_browsers.setRange(1, 8)
         self.sp_mode_c_browsers.setValue(int(c.get("mode_c_browsers", 3)))
         self.sp_mode_c_browsers.setToolTip(
-            "Số Chrome (Camoufox) chạy song song để ra voice nhanh (1-8).\n"
-            "Máy khỏe -> tăng lên (3-6) để mint token song song, nhanh hơn nhiều.\n"
-            "Chung 1 IP 4G (16 request/IP -> tự xoay). Mỗi Chrome ~200MB RAM.")
-        form.addRow("  Số Chrome song song (Mode C):", self.sp_mode_c_browsers)
+            "Số Chrome TỐI ĐA (1-8). Tool TỰ điều chỉnh theo tài nguyên máy lúc chạy:\n"
+            "máy khỏe/rảnh -> chạy nhiều Chrome (nhanh), máy yếu/bận -> ít lại (không treo).\n"
+            "Không bao giờ vượt số này, cũng không nhiều hơn số chunk cần làm.\n"
+            "Chung 1 IP 4G (16 req/IP -> tự xoay). Mỗi Chrome ~350MB RAM.")
+        form.addRow("  Số Chrome tối đa (tự điều chỉnh):", self.sp_mode_c_browsers)
 
         self.chk_maint = QCheckBox("🤖 Tự bảo trì nền (quét quota + reset + cảnh báo)")
         self.chk_maint.setToolTip(
@@ -678,7 +679,7 @@ class AutoTab(QWidget):
             nb = c.get("mode_c_browsers", 3)
             self.lbl_cfg.setText(
                 f"🆕 MODE C (anonymous, KHÔNG cần tài khoản)  •  "
-                f"model eleven_v3  •  {nb} Chrome song song  •  "
+                f"model eleven_v3  •  tối đa {nb} Chrome (tự điều chỉnh theo máy)  •  "
                 f"1000 ký tự/chunk  •  tự xoay 4G (16 req/IP)\n"
                 f"auto-start {c.get('auto_start_delay_sec',60)}s  •  "
                 f"quét {c.get('poll_interval',300)}s  •  "
