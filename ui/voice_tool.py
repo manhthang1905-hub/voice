@@ -2549,8 +2549,10 @@ class ModeCVoiceWorker(QThread):
         self._cancelled = True
 
     def run(self):
-        from core.mode_c_engine import ModeCEngine, generate_file, kill_orphan_browsers
+        from core.mode_c_engine import (ModeCEngine, generate_file,
+                                         kill_orphan_browsers, begin_session)
         kill_orphan_browsers()
+        begin_session()   # bat dau phien -> lam SACH (xoay IP moi) o file dau
         engine = ModeCEngine(
             voice_id=self.voice_id, model_id=self.model_id,
             language_code=self.language_code,

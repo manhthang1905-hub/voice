@@ -198,6 +198,13 @@ class AutoWorker(QThread):
         self.channel_update.emit(channels)
 
         # 4. Convert từng channel
+        # BAT DAU PHIEN: danh dau de lam SACH (xoay IP moi + kill browser cu) o file dau.
+        if self.mode_c and any(c[2] for c in channels):
+            try:
+                from core.mode_c_engine import begin_session
+                begin_session()
+            except Exception:
+                pass
         for ch in channels:
             if self._stopped:
                 break

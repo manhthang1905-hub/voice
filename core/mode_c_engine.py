@@ -193,6 +193,7 @@ class _Shared4G:
         self.rotate_lock = threading.Lock()
         self.budget_lock = threading.Lock()
         self._p4g = None
+        self.session_fresh = False  # da lam SACH dau phien chua (xoay IP moi + reset)
 
     def p4g(self):
         if self._p4g is None:
@@ -216,6 +217,14 @@ def get_shared_4g():
             if _SHARED_4G is None:
                 _SHARED_4G = _Shared4G()
     return _SHARED_4G
+
+
+def begin_session():
+    """Danh dau BAT DAU 1 phien tao voice moi -> lan start_file dau se lam SACH
+    (xoay IP moi + kill browser cu). Goi khi bam Start / bat dau job queue / luot Auto.
+    """
+    sh = get_shared_4g()
+    sh.session_fresh = False
 
 
 class ModeCEngine:
@@ -275,15 +284,43 @@ class ModeCEngine:
     def cancel(self):
         self._cancelled = True
 
+    def fresh_start(self):
+        """SACH DAU PHIEN (chay 1 lan): khong tin du lieu cu tu truoc.
+
+        Ly do (user yeu cau): IP hien tai co the da bi dot o phien/viec truoc, browser
+        Camoufox cu co the con sot. Bat dau lam voice -> phai SACH:
+          - Kill browser cu con sot (khong dung Chrome cu da flag).
+          - XOAY IP MOI (khong tin IP dang co - co the da dung nhieu).
+          - Reset ngan sach ve 0 tren IP moi sach.
+        Chi lam 1 lan/phien (session_fresh) -> cac folder sau khong lam lai.
+        """
+        if not self.use_4g:
+            return
+        with self._sh.rotate_lock:
+            if self._sh.session_fresh:
+                return   # da sach roi phien nay
+            self._sh.session_fresh = True
+        self.on_log("🧹 [ModeC] Bat dau phien - lam SACH (kill browser cu + xoay IP moi)...")
+        # 1. Kill browser cu con sot
+        try:
+            kill_orphan_browsers()
+        except Exception:
+            pass
+        # 2. Xoay IP moi sach (khong tin IP cu) + reset budget (rotate_ip da reset ip_used=0)
+        self.rotate_ip(self._sh.ip_generation)
+
     def start_file(self, n_chunks: int):
         """Goi DAU moi file: dam bao file lam TRON tren 1 IP (khong dut giua chung).
 
         Dung ngan sach IP DUNG CHUNG (xuyen folder) -> khong tinh sai 'IP con full'.
-        Neu ngan sach IP CON LAI khong du cho ca file -> xoay IP MOI ngay tu dau.
+        Lan dau phien: fresh_start (sach). Sau do: xoay IP neu con lai khong du cho file.
         (File > 16 chunk khong the vua 1 IP -> van xoay giua chung, nhung checkpoint lo.)
         """
         if not self.use_4g:
             return
+        # Dau phien -> lam sach (khong dung IP/browser cu)
+        if not self._sh.session_fresh:
+            self.fresh_start()
         with self._sh.budget_lock:
             remaining = IP_REQUEST_BUDGET - self._sh.ip_used
             need = min(n_chunks, IP_REQUEST_BUDGET)   # file lon: can it nhat full 1 IP
@@ -532,37 +569,30 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
     chunks = split_text(text, max_chars=ANON_MAX_CHARS)
     base = os.path.splitext(os.path.basename(txt_path))[0]
 
-    # Checkpoint dir: luu tung chunk audio da xong
+    # LUON LAM SACH TU DAU (user yeu cau): KHONG dung chunk cu tu phien truoc.
+    # Ly do: neu txt doi / cach chia khac / voice khac -> chunk cu khong khop -> tron
+    # 2 phien ban -> voice sai/lech. An toan nhat: moi lan lam file la XOA CHECKPOINT
+    # CU + tao lai TOAN BO chunk. Checkpoint chi chong mat khi crash TRONG cung lan chay.
     ckpt_dir = os.path.join(output_dir, ".modec_ckpt", base)
+    try:
+        import shutil
+        shutil.rmtree(ckpt_dir, ignore_errors=True)
+    except Exception:
+        pass
     os.makedirs(ckpt_dir, exist_ok=True)
 
     def _ckpt_path(i):
         return os.path.join(ckpt_dir, f"chunk_{i:04d}.mp3")
 
-    # Load chunk da co tu phien truoc (checkpoint) -> chi lam chunk thieu.
-    # RESUME SACH: chi nhan checkpoint HOP LE (mp3 doc duoc + du thoi luong). Chunk hong
-    # -> xoa + lam lai -> voice cuoi khong the loi do checkpoint rac.
+    # Lam TOAN BO chunk tu dau (khong load cu)
     results = [None] * len(chunks)
-    todo = []
-    for i in range(len(chunks)):
-        cp = _ckpt_path(i)
-        if _valid_mp3_file(cp):
-            with open(cp, "rb") as f:
-                results[i] = f.read()
-        else:
-            if os.path.exists(cp):
-                try:
-                    os.remove(cp)   # xoa checkpoint hong
-                except Exception:
-                    pass
-            todo.append(i)
+    todo = list(range(len(chunks)))
 
-    done_before = len(chunks) - len(todo)
     # So Chrome LINH HOAT theo tai nguyen may LUC NAY (RAM/CPU) + so chunk + tran cau hinh.
     # -> may khoe/ranh chay nhieu Chrome (nhanh), may yeu/ban it lai (khong treo).
     n_slots = auto_browser_count(max(1, len(todo)), engine.n_browsers, on_log=engine.on_log)
     engine.on_log(f"[ModeC] {base}: {len(text):,} chars -> {len(chunks)} chunk "
-                  f"({done_before} da co, {len(todo)} can lam), {n_slots} Chrome song song")
+                  f"(lam sach tu dau), {n_slots} Chrome song song")
 
     if todo:
         # DAM BAO file lam tron tren 1 IP (moi voice/file 1 IP sach) -> khong dut giua chung
