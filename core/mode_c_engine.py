@@ -177,8 +177,49 @@ def auto_browser_count(n_chunks: int, cfg_max: int, on_log=lambda *_: None) -> i
         return max(1, min(hard_max, n_chunks))
 
 
+class _Shared4G:
+    """Trang thai 4G DUNG CHUNG toan tool (SINGLETON).
+
+    LY DO: ca may chi co 1 dien thoai/1 IP tai 1 thoi diem. Truoc day moi folder tao
+    1 ModeCEngine moi -> _ip_used reset ve 0 -> engine tuong 'IP con full 16 req' du IP
+    do da bi folder truoc dung roi -> tinh SAI, xoay IP giua chung (bug user thay).
+    Chuyen trang thai IP thanh singleton -> ngan sach IP lien tuc xuyen folder/engine.
+    """
+    def __init__(self):
+        self.ip_used = 0            # so request da dung tren IP HIEN TAI (xuyen folder)
+        self.ip_generation = 0     # tang moi lan xoay IP
+        self.cur_ip = "?"
+        self.last_rotate = 0.0
+        self.rotate_lock = threading.Lock()
+        self.budget_lock = threading.Lock()
+        self._p4g = None
+
+    def p4g(self):
+        if self._p4g is None:
+            from accounts.proxy import Proxy4G
+            self._p4g = Proxy4G()
+            try:
+                self.cur_ip = self._p4g.get_ip() or "?"
+            except Exception:
+                pass
+        return self._p4g
+
+
+_SHARED_4G = None
+_SHARED_4G_LOCK = threading.Lock()
+
+
+def get_shared_4g():
+    global _SHARED_4G
+    if _SHARED_4G is None:
+        with _SHARED_4G_LOCK:
+            if _SHARED_4G is None:
+                _SHARED_4G = _Shared4G()
+    return _SHARED_4G
+
+
 class ModeCEngine:
-    """Quan ly pool nhieu Chrome + 1 4G chung, xoay IP khi flag."""
+    """Quan ly pool nhieu Chrome + 1 4G CHUNG (singleton), xoay IP khi flag."""
 
     def __init__(self, voice_id, model_id="eleven_v3", language_code="vi",
                  use_4g=True, n_browsers=2, headless=False,
@@ -191,33 +232,23 @@ class ModeCEngine:
         self.headless = headless
         self.on_log = on_log
 
-        self._p4g = None
-        if use_4g:
-            from accounts.proxy import Proxy4G
-            self._p4g = Proxy4G()
-
-        self._rotate_lock = threading.Lock()
-        self._ip_generation = 0        # tang moi lan xoay IP
-        self._last_rotate = 0.0
+        # Trang thai 4G DUNG CHUNG (xuyen folder/engine) -> ngan sach IP khong bi reset.
+        self._sh = get_shared_4g() if use_4g else None
+        self._p4g = self._sh.p4g() if self._sh else None
         self._cancelled = False
-        # Ngan sach IP: dem so request da dung tren IP hien tai (CHUNG cho moi Chrome).
-        # Dat IP_REQUEST_BUDGET (15) -> xoay CHU DONG truoc khi cham loi (16).
-        self._ip_used = 0
-        self._budget_lock = threading.Lock()
-        self._cur_ip = "?"             # IP 4G hien tai (cache de log, khong goi API lien tuc)
-        if self._p4g:
-            try:
-                self._cur_ip = self._p4g.get_ip() or "?"
-            except Exception:
-                pass
-        # Thong ke phien (de log tong ket + GUI doc)
+        # Thong ke phien (moi engine rieng - de log tong ket 1 file)
         self.stat = {
             "chunk_ok": 0, "chunk_fail": 0, "ip_rotations": 0,
             "chrome_reopens": 0, "retries": 0, "flags": 0,
         }
 
+    # --- Proxy con tro toi trang thai chung ---
+    @property
+    def _ip_generation(self):
+        return self._sh.ip_generation if self._sh else 0
+
     def current_ip(self):
-        return self._cur_ip
+        return self._sh.cur_ip if self._sh else "?"
 
     def recover_4g(self):
         """Luong socks5 4G reset (ConnectionReset) -> scan/reconnect. Thread-safe +
@@ -226,15 +257,15 @@ class ModeCEngine:
         if not self._p4g:
             return
         now = time.time()
-        with self._rotate_lock:
-            if now - getattr(self, "_last_recover", 0) < 15:
+        with self._sh.rotate_lock:
+            if now - getattr(self._sh, "last_recover", 0) < 15:
                 return   # vua recover xong -> khoi lam lai
-            self._last_recover = now
+            self._sh.last_recover = now
             try:
                 ok = self._p4g.ensure_alive(on_log=self.on_log)
                 if ok:
-                    self._cur_ip = self._p4g.get_ip() or self._cur_ip
-                    self.on_log(f"  ✓ 4G reconnect OK (IP {self._cur_ip})")
+                    self._sh.cur_ip = self._p4g.get_ip() or self._sh.cur_ip
+                    self.on_log(f"  ✓ 4G reconnect OK (IP {self._sh.cur_ip})")
                 else:
                     self.on_log("  ⚠ 4G VAN chua thong sau scan — kiem tra tab '4G Proxy' "
                                 "(dien thoai/ADB/EveryProxy)")
@@ -247,37 +278,33 @@ class ModeCEngine:
     def start_file(self, n_chunks: int):
         """Goi DAU moi file: dam bao file lam TRON tren 1 IP (khong dut giua chung).
 
-        Neu ngan sach IP CON LAI khong du cho ca file (ma file vua trong 1 IP) -> xoay
-        IP MOI ngay tu dau. -> file khong bao gio bi 'lam do roi het IP' giua chung.
+        Dung ngan sach IP DUNG CHUNG (xuyen folder) -> khong tinh sai 'IP con full'.
+        Neu ngan sach IP CON LAI khong du cho ca file -> xoay IP MOI ngay tu dau.
         (File > 16 chunk khong the vua 1 IP -> van xoay giua chung, nhung checkpoint lo.)
         """
         if not self.use_4g:
             return
-        with self._budget_lock:
-            remaining = IP_REQUEST_BUDGET - self._ip_used
+        with self._sh.budget_lock:
+            remaining = IP_REQUEST_BUDGET - self._sh.ip_used
             need = min(n_chunks, IP_REQUEST_BUDGET)   # file lon: can it nhat full 1 IP
             if remaining < need:
                 self.on_log(
                     f"🆕 [4G] File can {n_chunks} chunk, IP hien tai chi con {remaining} req "
                     f"-> xoay IP MOI de lam tron file (moi voice/file 1 IP sach)")
-                self.rotate_ip(self._ip_generation)
-                self._ip_used = 0
+                self.rotate_ip(self._sh.ip_generation)
 
     def acquire_ip_slot(self, seen_generation: int):
-        """Xin 1 'suat' request tren IP hien tai. Neu IP da dung >= budget -> xoay truoc.
-
-        -> (generation hien tai). Worker dung gen nay de biet IP nao dang xai.
-        Goi TRUOC moi request. Thread-safe.
+        """Xin 1 'suat' request tren IP hien tai (ngan sach DUNG CHUNG xuyen folder).
+        Neu IP da dung >= budget -> xoay truoc. -> generation hien tai. Thread-safe.
         """
-        with self._budget_lock:
-            if self.use_4g and self._ip_used >= IP_REQUEST_BUDGET:
+        with self._sh.budget_lock:
+            if self.use_4g and self._sh.ip_used >= IP_REQUEST_BUDGET:
                 # Het ngan sach IP -> xoay CHU DONG (truoc khi server tra sign_in_required)
-                self.on_log(f"[ModeC] IP dung {self._ip_used}/{IP_REQUEST_BUDGET} req "
+                self.on_log(f"[ModeC] IP dung {self._sh.ip_used}/{IP_REQUEST_BUDGET} req "
                             f"-> xoay CHU DONG")
-                new_gen = self.rotate_ip(self._ip_generation)
-                self._ip_used = 0
-            self._ip_used += 1
-            return self._ip_generation
+                self.rotate_ip(self._sh.ip_generation)
+            self._sh.ip_used += 1
+            return self._sh.ip_generation
 
     # ---------- proxy ----------
     def _proxies(self):
@@ -292,16 +319,16 @@ class ModeCEngine:
         Neu da co worker khac xoay (gen hien tai > seen) -> khong xoay lai, tra gen moi.
         -> generation moi (de worker biet phai mo Chrome voi IP moi).
         """
-        with self._rotate_lock:
-            if self._ip_generation > seen_generation:
-                return self._ip_generation      # worker khac da xoay roi
+        sh = self._sh
+        with sh.rotate_lock:
+            if sh.ip_generation > seen_generation:
+                return sh.ip_generation      # worker khac da xoay roi
             if not self._p4g:
-                # Khong 4G -> khong xoay duoc, chi tang gen de mo Chrome moi
-                self._ip_generation += 1
-                self._ip_used = 0
-                return self._ip_generation
+                sh.ip_generation += 1
+                sh.ip_used = 0
+                return sh.ip_generation
             # Cooldown
-            wait = ROTATE_COOLDOWN - (time.time() - self._last_rotate)
+            wait = ROTATE_COOLDOWN - (time.time() - sh.last_rotate)
             if wait > 0:
                 time.sleep(wait)
             try:
@@ -309,7 +336,6 @@ class ModeCEngine:
             except Exception:
                 old_ip = ""
             # Xoay + VERIFY IP that su doi (24/7: neu 4G rot ADB, rotate co the khong doi IP).
-            # Thu toi 3 lan; neu 4G chet han -> cho hoi (khong bo het file).
             new_ip = old_ip
             for attempt in range(3):
                 try:
@@ -321,21 +347,20 @@ class ModeCEngine:
                     new_ip = ""
                 if new_ip and new_ip != old_ip:
                     break   # IP da doi that su
-                # Chua doi / 4G 'chet gia' -> SCAN THIET BI (bug: chi can scan la song)
                 self.on_log(f"[ModeC] IP chua doi ({old_ip}->{new_ip or '?'}), scan 4G...")
                 try:
                     self._p4g.ensure_alive(on_log=self.on_log)
                 except Exception:
                     pass
                 time.sleep(6)
-            self._ip_generation += 1
-            self._ip_used = 0                    # IP moi -> reset ngan sach
-            self._last_rotate = time.time()
-            self._cur_ip = new_ip or "?"
+            sh.ip_generation += 1
+            sh.ip_used = 0                    # IP moi -> reset ngan sach CHUNG
+            sh.last_rotate = time.time()
+            sh.cur_ip = new_ip or "?"
             self.stat["ip_rotations"] += 1
             self.on_log(f"🔄 [4G] Xoay IP: {old_ip or '?'} -> {new_ip or '?'} "
-                        f"(lan xoay #{self.stat['ip_rotations']}, gen {self._ip_generation})")
-            return self._ip_generation
+                        f"(lan xoay #{self.stat['ip_rotations']}, gen {sh.ip_generation})")
+            return sh.ip_generation
 
 
 class _BrowserSlot:
