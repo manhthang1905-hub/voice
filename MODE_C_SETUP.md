@@ -14,7 +14,11 @@ Mode C tạo voice qua web demo elevenlabs.io **không đăng nhập**, KHÔNG c
 pip install -r requirements.txt          # đã có camoufox + playwright
 python -m camoufox fetch                 # tải browser antidetect (~100MB, 1 lần)
 ```
-Cần: **4G proxy đang chạy** (socks5 127.0.0.1:10001) — như Mode master.
+**4G tự chạy khi mở tool** — không cần chạy `START_4G_SERVER.bat` riêng nữa.
+- Máy CÓ điện thoại cắm ADB: tool tự chạy 4G server nền (socks5 :10001 + API :19800 + LAN relay :10002).
+- Máy KHÔNG có điện thoại (máy phụ dùng chung 4G qua LAN): tool bỏ qua auto-start;
+  vào tab **4G Proxy → Cài đặt 4G** trỏ **SOCKS5 Host = IP LAN máy chính**, **Port = 10002**,
+  **API Host = IP LAN máy chính**. (2 máy phải cùng mạng LAN.)
 
 ## Bật/tắt
 Tab Auto Convert → Cài đặt nâng cao:
