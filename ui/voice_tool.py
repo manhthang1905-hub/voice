@@ -724,37 +724,29 @@ class VoiceWorker(QThread):
             if not ph.get("proxy_running", False):
                 self.log_signal.emit(
                     f"  ⚠ Proxy local chưa sẵn sàng cho {ph.get('name','')} "
-                    f"— thử restart...")
-                # G�?i start để restart ADB forward
-                _req.post(
-                    f"{API_BASE}/proxy/{ph['id']}/start?key={API_KEY}",
-                    timeout=10)
-                time.sleep(2)
-
-                # Nếu phone chưa bật EveryProxy/SIM/4G thì báo đúng nguyên nhân,
-                # không rotate mù vì rotate không sửa được lỗi này.
+                    f"— tự scan thiết bị (không báo chết oan)...")
+                # BUG DA GAP: proxy 'chet gia' — chi can SCAN thiet bi la song lai.
+                # ensure_alive: start + scan + re-check. Chi bao chet neu THUC SU chet.
+                if p.ensure_alive(on_log=lambda m: self.log_signal.emit(m)):
+                    ip2 = p.get_ip()
+                    self.log_signal.emit(f"  ✓ Proxy OK sau scan (IP: {ip2})")
+                    audit("proxy_ok", ip=ip2, phase="after_scan")
+                    return ip2
+                # Van chet that su -> bao nguyen nhan tu scan
                 try:
-                    scan = _req.post(
-                        f"{API_BASE}/scan?key={API_KEY}",
-                        timeout=25)
+                    scan = _req.post(f"{API_BASE}/scan?key={API_KEY}", timeout=25)
                     if scan.status_code == 200:
-                        scan_data = scan.json()
-                        devices = scan_data.get("devices", [])
+                        devices = scan.json().get("devices", [])
                         if devices:
-                            steps = devices[0].get("steps", [])
-                            for step in steps:
+                            for step in devices[0].get("steps", []):
                                 if step.get("status") == "fail":
-                                    step_name = step.get("step", "Unknown")
-                                    message = step.get("message", "")
-                                    fix = step.get("fix", "")
                                     self.log_signal.emit(
-                                        f"  �?� {step_name}: {message}")
-                                    if fix:
-                                        self.log_signal.emit(
-                                            f"     Fix: {fix}")
+                                        f"  ⚠ {step.get('step','?')}: {step.get('message','')}")
+                                    if step.get("fix"):
+                                        self.log_signal.emit(f"     Fix: {step['fix']}")
                                     audit("proxy_dead",
-                                          phase=f"scan_{step_name.lower()}",
-                                          message=message)
+                                          phase=f"scan_{step.get('step','').lower()}",
+                                          message=step.get("message", ""))
                                     return None
                 except Exception:
                     pass

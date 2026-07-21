@@ -672,14 +672,28 @@ class AutoTab(QWidget):
 
     def _update_cfg_label(self):
         c = self.config
-        self.lbl_cfg.setText(
-            f"Model: {c.get('default_model','eleven_v3')}  •  "
-            f"stab {c.get('voice_stability',0.5)} / sim {c.get('voice_similarity_boost',0.8)}  •  "
-            f"chunk {c.get('max_chunk_size',5000)}  •  "
-            f"luồng {c.get('max_threads',3)}\n"
-            f"auto-start {c.get('auto_start_delay_sec',60)}s  •  "
-            f"quét {c.get('poll_interval',300)}s  •  "
-            f"ổn định {c.get('stable_wait',10)}s")
+        mode_c = bool(c.get("mode_c_enabled", True))
+        if mode_c:
+            # Che do MODE C: hien thong so lien quan (khong master)
+            nb = c.get("mode_c_browsers", 3)
+            self.lbl_cfg.setText(
+                f"🆕 MODE C (anonymous, KHÔNG cần tài khoản)  •  "
+                f"model eleven_v3  •  {nb} Chrome song song  •  "
+                f"1000 ký tự/chunk  •  tự xoay 4G (16 req/IP)\n"
+                f"auto-start {c.get('auto_start_delay_sec',60)}s  •  "
+                f"quét {c.get('poll_interval',300)}s  •  "
+                f"ổn định {c.get('stable_wait',10)}s")
+            self.lbl_cfg.setStyleSheet("color:#8e44ad; font-size:10px; font-weight:bold;")
+        else:
+            self.lbl_cfg.setText(
+                f"Master mode  •  Model: {c.get('default_model','eleven_v3')}  •  "
+                f"stab {c.get('voice_stability',0.5)} / sim {c.get('voice_similarity_boost',0.8)}  •  "
+                f"chunk {c.get('max_chunk_size',5000)}  •  "
+                f"luồng {c.get('max_threads',3)}\n"
+                f"auto-start {c.get('auto_start_delay_sec',60)}s  •  "
+                f"quét {c.get('poll_interval',300)}s  •  "
+                f"ổn định {c.get('stable_wait',10)}s")
+            self.lbl_cfg.setStyleSheet("color:#888; font-size:10px;")
 
     def _open_advanced_settings(self):
         dlg = AutoSettingsDialog(self.config, self)
@@ -732,7 +746,7 @@ class AutoTab(QWidget):
             box.addWidget(val)
             box.addWidget(cap)
             ovl.addLayout(box)
-            return val
+            return val, cap
 
         def _sep(text="│"):
             s = QLabel(text)
@@ -740,15 +754,15 @@ class AutoTab(QWidget):
             ovl.addWidget(s)
 
         # --- SAN XUAT (voice thuc te tren dia) ---
-        self.ov_today = _stat("Xử lý hôm nay", "Số file voice đã tạo xong HÔM NAY", big=True)
-        self.ov_pending = _stat("Còn tồn", "File chưa xử lý (TXT chưa có MP3)", big=True)
-        self.ov_donetotal = _stat("Tổng đã làm", "Tổng file đã có MP3 (mọi thời điểm)")
+        self.ov_today, _ = _stat("Xử lý hôm nay", "Số file voice đã tạo xong HÔM NAY", big=True)
+        self.ov_pending, _ = _stat("Còn tồn", "File chưa xử lý (TXT chưa có MP3)", big=True)
+        self.ov_donetotal, _ = _stat("Tổng đã làm", "Tổng file đã có MP3 (mọi thời điểm)")
         _sep()
-        # --- TAI NGUYEN ---
-        self.ov_capacity = _stat("Quota tạo được", "Số giờ voice có thể tạo từ quota còn lại của 1500 TK")
-        self.ov_alive = _stat("TK sống", "Số TK còn quota")
-        self.ov_master = _stat("Master")
-        self.ov_runway = _stat("Còn ~ngày", "Quota còn ÷ mức dùng hôm nay")
+        # --- TAI NGUYEN (nhan doi theo mode: master vs Mode C) ---
+        self.ov_capacity, self._ov_cap_lbl = _stat("Nguồn voice", "Mode C: không giới hạn TK. Master: giờ voice từ quota.")
+        self.ov_alive, self._ov_alive_lbl = _stat("IP 4G", "Mode C: IP 4G hiện tại. Master: số TK sống.")
+        self.ov_master, self._ov_master_lbl = _stat("Chrome", "Mode C: số Chrome. Master: số master.")
+        self.ov_runway, self._ov_runway_lbl = _stat("4G", "Mode C: 4G còn sống? Master: còn ~ngày.")
         ovl.addStretch(1)
         self.btn_refresh_ov = QPushButton("↻")
         self.btn_refresh_ov.setFixedWidth(28)
@@ -1159,31 +1173,95 @@ class AutoTab(QWidget):
                 % ("#e67e22" if pf > 0 else "#27ae60"))
             self.ov_donetotal.setText(f"{p['done_files']} file")
 
-            # --- TAI NGUYEN ---
-            rep = fleet_report()
-            remaining = rep.get("total_remaining", 0)
-            used = todays_usage_chars()
-            masters = count_active()
-            self.ov_capacity.setText(self._fmt_hours(remaining))
-            self.ov_alive.setText(str(rep.get("alive_now", 0)))
-            self.ov_master.setText(str(masters))
-            self.ov_capacity.setStyleSheet(
-                "font-size:15px; font-weight:bold; color:%s;"
-                % ("#e74c3c" if remaining < 500_000 else
-                   ("#e67e22" if remaining < 2_000_000 else "#27ae60")))
-            self.ov_master.setStyleSheet(
-                "font-size:15px; font-weight:bold; color:%s;"
-                % ("#e74c3c" if masters < 2 else "#27ae60"))
-            if used > 0:
-                days = remaining / used
-                self.ov_runway.setText(f"{days:.1f}")
-                rc = "#e74c3c" if days < 1.5 else ("#e67e22" if days < 3 else "#27ae60")
+            # --- TAI NGUYEN: re nhanh theo mode ---
+            mode_c = bool(self.config.get("mode_c_enabled", True))
+            if mode_c:
+                self._update_overview_mode_c()
             else:
-                self.ov_runway.setText("∞")
-                rc = "#27ae60"
-            self.ov_runway.setStyleSheet(f"font-size:15px; font-weight:bold; color:{rc};")
+                # Nhan master
+                try:
+                    self._ov_cap_lbl.setText("Quota tạo được")
+                    self._ov_alive_lbl.setText("TK sống")
+                    self._ov_master_lbl.setText("Master")
+                    self._ov_runway_lbl.setText("Còn ~ngày")
+                except Exception:
+                    pass
+                rep = fleet_report()
+                remaining = rep.get("total_remaining", 0)
+                used = todays_usage_chars()
+                masters = count_active()
+                self.ov_capacity.setText(self._fmt_hours(remaining))
+                self.ov_alive.setText(str(rep.get("alive_now", 0)))
+                self.ov_master.setText(str(masters))
+                self.ov_capacity.setStyleSheet(
+                    "font-size:15px; font-weight:bold; color:%s;"
+                    % ("#e74c3c" if remaining < 500_000 else
+                       ("#e67e22" if remaining < 2_000_000 else "#27ae60")))
+                self.ov_master.setStyleSheet(
+                    "font-size:15px; font-weight:bold; color:%s;"
+                    % ("#e74c3c" if masters < 2 else "#27ae60"))
+                if used > 0:
+                    days = remaining / used
+                    self.ov_runway.setText(f"{days:.1f}")
+                    rc = "#e74c3c" if days < 1.5 else ("#e67e22" if days < 3 else "#27ae60")
+                else:
+                    self.ov_runway.setText("∞")
+                    rc = "#27ae60"
+                self.ov_runway.setStyleSheet(f"font-size:15px; font-weight:bold; color:{rc};")
         except Exception:
             pass
+
+    def _update_overview_mode_c(self):
+        """Tai nguyen cho MODE C: IP 4G, so Chrome, trang thai 4G (thay Quota/TK/Master)."""
+        # Doi nhan cot tai nguyen sang ngu canh Mode C
+        try:
+            self._ov_cap_lbl.setText("Nguồn voice")
+            self._ov_alive_lbl.setText("IP 4G")
+            self._ov_master_lbl.setText("Chrome")
+            self._ov_runway_lbl.setText("4G")
+        except Exception:
+            pass
+        # Nguon voice: Mode C = khong gioi han TK
+        self.ov_capacity.setText("∞ (anon)")
+        self.ov_capacity.setToolTip("Mode C: tạo voice không cần tài khoản, không giới hạn quota TK.")
+        self.ov_capacity.setStyleSheet("font-size:15px; font-weight:bold; color:#8e44ad;")
+        # IP 4G hien tai (tu engine dang chay, hoac hoi nhanh)
+        cur_ip = "—"
+        try:
+            eng = getattr(self, "_active_mode_c_engine", None)
+            if eng is not None:
+                cur_ip = eng.current_ip()
+            else:
+                from accounts.proxy import Proxy4G
+                cur_ip = Proxy4G().get_ip() or "—"
+        except Exception:
+            pass
+        self.ov_alive.setText(str(cur_ip))
+        self.ov_alive.setToolTip("IP 4G hiện tại (tự xoay sau 16 request/IP).")
+        # So Chrome song song cau hinh
+        nb = int(self.config.get("mode_c_browsers", 3))
+        self.ov_master.setText(f"{nb}")
+        self.ov_master.setToolTip("Số Chrome (Camoufox) chạy song song. Đổi ở Cài đặt nâng cao.")
+        self.ov_master.setStyleSheet("font-size:15px; font-weight:bold; color:#27ae60;")
+        # Trang thai 4G: kiem tra port 10001 (nhanh, khong block)
+        alive = self._quick_4g_alive()
+        self.ov_runway.setText("OK" if alive else "✗")
+        self.ov_runway.setToolTip("4G proxy còn sống? (socks5 127.0.0.1:10001)")
+        self.ov_runway.setStyleSheet(
+            "font-size:15px; font-weight:bold; color:%s;" % ("#27ae60" if alive else "#e74c3c"))
+
+    @staticmethod
+    def _quick_4g_alive():
+        """Check nhanh 4G socks5 port 10001 co listen khong (khong gui request)."""
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            r = s.connect_ex(("127.0.0.1", 10001))
+            s.close()
+            return r == 0
+        except Exception:
+            return False
 
     def _on_scan_done(self):
         self.lbl_status.setText("🔄 Đang chạy...")

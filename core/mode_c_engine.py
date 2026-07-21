@@ -170,6 +170,20 @@ class ModeCEngine:
         # Dat IP_REQUEST_BUDGET (15) -> xoay CHU DONG truoc khi cham loi (16).
         self._ip_used = 0
         self._budget_lock = threading.Lock()
+        self._cur_ip = "?"             # IP 4G hien tai (cache de log, khong goi API lien tuc)
+        if self._p4g:
+            try:
+                self._cur_ip = self._p4g.get_ip() or "?"
+            except Exception:
+                pass
+        # Thong ke phien (de log tong ket + GUI doc)
+        self.stat = {
+            "chunk_ok": 0, "chunk_fail": 0, "ip_rotations": 0,
+            "chrome_reopens": 0, "retries": 0, "flags": 0,
+        }
+
+    def current_ip(self):
+        return self._cur_ip
 
     def cancel(self):
         self._cancelled = True
@@ -232,13 +246,20 @@ class ModeCEngine:
                     new_ip = ""
                 if new_ip and new_ip != old_ip:
                     break   # IP da doi that su
-                # Chua doi / 4G chet -> cho roi thu lai
-                self.on_log(f"[ModeC] IP chua doi ({old_ip}->{new_ip or '?'}), cho 4G...")
-                time.sleep(8)
+                # Chua doi / 4G 'chet gia' -> SCAN THIET BI (bug: chi can scan la song)
+                self.on_log(f"[ModeC] IP chua doi ({old_ip}->{new_ip or '?'}), scan 4G...")
+                try:
+                    self._p4g.ensure_alive(on_log=self.on_log)
+                except Exception:
+                    pass
+                time.sleep(6)
             self._ip_generation += 1
             self._ip_used = 0                    # IP moi -> reset ngan sach
             self._last_rotate = time.time()
-            self.on_log(f"[ModeC] IP moi: {new_ip or '?'} (gen {self._ip_generation})")
+            self._cur_ip = new_ip or "?"
+            self.stat["ip_rotations"] += 1
+            self.on_log(f"🔄 [4G] Xoay IP: {old_ip or '?'} -> {new_ip or '?'} "
+                        f"(lan xoay #{self.stat['ip_rotations']}, gen {self._ip_generation})")
             return self._ip_generation
 
 
@@ -289,54 +310,73 @@ class _BrowserSlot:
         # Cap nhat gen (khong reopen) de dong bo — browser dung tiep binh thuong
         self.ip_gen = self.engine._ip_generation
 
-    def make_audio(self, chunk: str) -> bytes:
-        """Tao audio cho 1 chunk, tu xu ly loi (doi Chrome/IP). -> bytes."""
+    def make_audio(self, chunk: str, tag: str = "") -> bytes:
+        """Tao audio cho 1 chunk, tu xu ly loi (doi Chrome/IP). -> bytes.
+
+        tag: nhan de log (vd 'chunk 3/13') -> log giau du lieu de phat hien loi.
+        """
         last_err = None
         for attempt in range(MAX_CHUNK_ATTEMPTS):
             if self.engine._cancelled:
                 raise Exception("cancelled")
+            t0 = time.time()
             try:
                 # Xin suat IP (xoay CHU DONG neu IP da dung >= 15 req) -> lay gen + proxy MOI NHAT
                 self.ip_gen = self.engine.acquire_ip_slot(self.ip_gen)
                 _, proxy_requests = self.engine._proxies()
                 self.ensure_open()
+                t_mint = time.time()
                 token = self.session.mint_token()
                 self.tokens_minted += 1
+                mint_s = time.time() - t_mint
+                t_send = time.time()
                 audio = send_anonymous(
                     self.engine.voice_id,
                     token, chunk, self.engine.model_id,
                     self.engine.language_code, proxy=proxy_requests)
+                send_s = time.time() - t_send
                 # VALIDATE: audio phai hop le (khong nhan mp3 hong/cut) -> voice cuoi chuan
                 if not _valid_mp3_bytes(audio):
                     last_err = Exception(f"audio khong hop le ({len(audio or b'')}b)")
-                    self.engine.on_log(f"[ModeC] slot{self.slot_id}: audio hong -> lam lai chunk")
+                    self.engine.stat["retries"] += 1
+                    self.engine.on_log(f"  ⚠ slot{self.slot_id} {tag}: audio HONG "
+                                       f"({len(audio or b'')}b) -> lam lai (thu {attempt+1})")
                     time.sleep(1)
                     continue
+                # LOG CHI TIET: IP dung, thoi gian mint/send, so chars
+                if attempt > 0:
+                    self.engine.stat["retries"] += attempt
+                self.engine.on_log(
+                    f"  ✓ slot{self.slot_id} {tag}: {len(audio):,}b | IP {self.engine.current_ip()} | "
+                    f"mint {mint_s:.0f}s + tts {send_s:.0f}s"
+                    + (f" | thu lan {attempt+1}" if attempt > 0 else ""))
                 return audio
             except AnonIPExhausted as e:
                 # IP het luot free -> XOAY IP 4G. Token/browser van OK (browser mint qua
                 # IP may, doc lap 4G) -> KHONG mo lai Chrome (nhanh hon nhieu). Chunk sau
                 # tu dung IP moi qua proxy_requests.
                 last_err = e
+                self.engine.on_log(f"  💰 slot{self.slot_id} {tag}: IP het luot (16 req) -> xoay 4G")
                 self.ip_gen = self.engine.rotate_ip(self.ip_gen)
-                try:
-                    pass   # GIU nguyen Chrome, chi doi IP 4G
-                except Exception as re:
-                    last_err = re
             except AnonUnusualActivity as e:
                 # Flag unusual_activity -> doi fingerprint = mo Chrome MOI (4G sach).
                 last_err = e
-                self.engine.on_log(f"[ModeC] slot{self.slot_id}: flag -> Chrome moi (fingerprint moi)")
+                self.engine.stat["flags"] += 1
+                self.engine.on_log(f"  🚩 slot{self.slot_id} {tag}: FLAG unusual_activity "
+                                   f"-> doi Chrome (fingerprint moi)")
                 try:
                     self._reopen()
+                    self.engine.stat["chrome_reopens"] += 1
                 except Exception as re:
                     last_err = re
             except AnonTokenError as e:
                 # Khong lay duoc token -> Chrome hong -> mo Chrome moi (cung IP)
                 last_err = e
-                self.engine.on_log(f"[ModeC] slot{self.slot_id}: token fail -> Chrome moi")
+                self.engine.on_log(f"  🔧 slot{self.slot_id} {tag}: khong lay duoc token "
+                                   f"({str(e)[:50]}) -> mo Chrome moi")
                 try:
                     self._reopen()
+                    self.engine.stat["chrome_reopens"] += 1
                 except Exception as re:
                     last_err = re
             except Exception as e:
@@ -345,9 +385,12 @@ class _BrowserSlot:
                     raise    # loi that su -> khong retry
                 # network/timeout/401 tam thoi -> retry ngan
                 last_err = e
-                self.engine.on_log(f"[ModeC] slot{self.slot_id}: loi tam ({str(e)[:60]}) -> retry")
+                self.engine.stat["retries"] += 1
+                self.engine.on_log(f"  ⚠ slot{self.slot_id} {tag}: loi tam ({str(e)[:70]}) "
+                                   f"-> thu lai ({attempt+1}/{MAX_CHUNK_ATTEMPTS})")
                 time.sleep(2)
-        raise Exception(f"slot{self.slot_id}: chunk fail sau {MAX_CHUNK_ATTEMPTS} lan: {str(last_err)[:100]}")
+        self.engine.stat["chunk_fail"] += 1
+        raise Exception(f"slot{self.slot_id} {tag}: FAIL sau {MAX_CHUNK_ATTEMPTS} lan: {str(last_err)[:100]}")
 
     def close(self):
         if self.session:
@@ -369,6 +412,7 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
     from core.audio_merger import merge_audio_bytes
     from core.anonymous_tts import ANON_MAX_CHARS
 
+    t_start = time.time()
     with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
         text = clean_text(f.read())
     if not text.strip():
@@ -422,9 +466,11 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
                         idx, chunk = q.get_nowait()
                     except queue.Empty:
                         break
+                    tag = f"chunk {idx+1}/{len(chunks)}"
                     try:
-                        audio = slot.make_audio(chunk)
+                        audio = slot.make_audio(chunk, tag=tag)
                         results[idx] = audio
+                        engine.stat["chunk_ok"] += 1
                         # Luu checkpoint NGAY, ATOMIC (ghi .tmp roi rename) + fsync
                         # -> khong bao gio co checkpoint ghi do dang khi crash.
                         try:
@@ -437,11 +483,10 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
                             os.replace(tmp, cp)
                         except Exception:
                             pass
-                        engine.on_log(f"[ModeC] chunk {idx+1}/{len(chunks)} OK ({len(audio):,} bytes)")
                     except Exception as e:
                         with err_lock:
                             errors.append((idx, str(e)[:120]))
-                        engine.on_log(f"[ModeC] chunk {idx+1} THAT BAI: {str(e)[:100]}")
+                        engine.on_log(f"  ❌ {tag} THAT BAI: {str(e)[:100]}")
                     finally:
                         q.task_done()
             finally:
@@ -488,7 +533,13 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
 
     # OK -> doi ten atomic sang file that
     os.replace(tmp_mp3, mp3_path)
-    engine.on_log(f"[ModeC] XONG {mp3_path} ({os.path.getsize(mp3_path):,} bytes, {final_dur:.0f}s)")
+    dt = int(time.time() - t_start)
+    st = engine.stat
+    engine.on_log(
+        f"✅ XONG {base}.mp3 | {os.path.getsize(mp3_path)//1024:,}KB, {final_dur:.0f}s "
+        f"(~{final_dur/60:.1f} phut) | {dt}s | IP {engine.current_ip()} | "
+        f"xoay IP {st['ip_rotations']}x, doi Chrome {st['chrome_reopens']}x, "
+        f"retry {st['retries']}, flag {st['flags']}")
 
     # Xong + file cuoi HOP LE -> xoa checkpoint dir
     try:

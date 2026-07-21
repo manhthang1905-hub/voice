@@ -27,6 +27,7 @@ Cách dùng:
 """
 
 import os
+import time
 import requests as req
 from typing import Optional, Dict
 from utils.logger import log
@@ -310,6 +311,54 @@ class Proxy4G:
         if isinstance(info, list):
             return info
         return info.get("devices", info.get("proxies", []))
+
+    def scan_devices(self, timeout: int = 30) -> dict:
+        """Goi /scan de server QUET LAI + KHOI DONG forward cho cac device.
+
+        Dung khi proxy 'chet gia' (socks5 chua forward nhung phone van ket noi) —
+        chi can scan la song lai. -> dict ket qua scan (hoac {} neu loi).
+        """
+        try:
+            r = req.post(f"{API_BASE}/scan?key={API_KEY}", timeout=timeout)
+            return r.json() if r.status_code == 200 else {}
+        except Exception:
+            return {}
+
+    def ensure_alive(self, on_log=lambda *_: None, max_try: int = 2) -> bool:
+        """Dam bao 4G THUC SU forward duoc (khong bao chet oan).
+
+        Bug da gap: server bao proxy_running=false / get_ip rong, nhung chi can SCAN
+        thiet bi la song lai. Ham nay: neu chua san sang -> scan + start + re-check.
+        -> True neu 4G san sang forward, False neu that su chet.
+        """
+        for attempt in range(max_try):
+            info = self.get_info()
+            proxies = info.get("proxies", info.get("devices", []))
+            if not proxies:
+                on_log("  ⚠ 4G: khong co phone -> scan lai...")
+                self.scan_devices()
+                time.sleep(2)
+                continue
+            ph = proxies[0]
+            running = ph.get("proxy_running", False)
+            ip = (ph.get("current_4g_ip") or "").strip()
+            if running and ip:
+                return True   # san sang
+            # Chua san sang -> thu start + scan (khong bao chet ngay)
+            on_log(f"  ⚠ 4G chua san sang (running={running}) -> start + scan...")
+            try:
+                req.post(f"{API_BASE}/proxy/{ph['id']}/start?key={API_KEY}", timeout=10)
+            except Exception:
+                pass
+            self.scan_devices()
+            time.sleep(3)
+            # Re-check sau scan
+            info2 = self.get_info()
+            px2 = info2.get("proxies", info2.get("devices", []))
+            if px2 and px2[0].get("proxy_running") and (px2[0].get("current_4g_ip") or "").strip():
+                on_log(f"  ✓ 4G song lai sau scan (IP {px2[0].get('current_4g_ip')})")
+                return True
+        return False
 
     def test_device(self, device: str) -> dict:
         """Test 1 device (IP, latency)."""
