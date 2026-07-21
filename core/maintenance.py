@@ -107,12 +107,29 @@ def depletion_note(report, used_today):
 
 
 def run_maintenance(on_log=lambda *_: None, should_stop=lambda: False,
-                    do_relink=False):
+                    do_relink=False, do_health_check=False):
     """1 chu ky bao tri: quet quota -> bao cao -> canh bao -> (tuy chon) re-link.
     -> dict ket qua.
+
+    do_health_check=True: kiem tra suc khoe master + loai master chet (AUTO).
     """
     from core.quota_report import fleet_report, format_report
 
+    # 1. Health-check master (neu bat)
+    hc_result = None
+    if do_health_check:
+        try:
+            from core.master_pool import get_shared_pool
+            pool = get_shared_pool()
+            on_log("[Maintenance] Health-check master...")
+            hc_result = pool.health_check_all(on_log=on_log)
+            if hc_result["dead"]:
+                on_log(f"[Maintenance] {len(hc_result['dead'])} master CHET, loai bo...")
+                pool.auto_remove_dead_masters()
+        except Exception as e:
+            on_log(f"[Maintenance] health-check loi: {str(e)[:80]}")
+
+    # 2. Quet quota
     scan_quota(on_log=on_log, should_stop=should_stop)
     rep = fleet_report()
     used = todays_usage_chars()
@@ -122,6 +139,7 @@ def run_maintenance(on_log=lambda *_: None, should_stop=lambda: False,
     if warn:
         on_log(warn)
 
+    # 3. Re-link (neu bat)
     relink = None
     if do_relink and not should_stop():
         # Chi re-link khi co TK chua san sang (pending/mo coi) de tranh chay vo ich
@@ -143,4 +161,5 @@ def run_maintenance(on_log=lambda *_: None, should_stop=lambda: False,
         except Exception as e:
             on_log(f"[Maintenance] re-link loi: {str(e)[:80]}")
 
-    return {"report": rep, "used_today": used, "warn": warn, "relink": relink}
+    return {"report": rep, "used_today": used, "warn": warn,
+            "relink": relink, "health_check": hc_result}

@@ -291,3 +291,42 @@ def _save(data):
             os.remove(tmp)
         except Exception:
             pass
+
+
+# ============================================================
+# VOICE PAID TRACKING (voice can Creator tier+)
+# ============================================================
+_PAID_VOICES_FILE = os.path.join(PROJECT_ROOT, "config", "paid_voices.json")
+
+
+def is_voice_paid(voice_id: str) -> bool:
+    """Voice nay can paid account (Creator tier+)?"""
+    if not os.path.exists(_PAID_VOICES_FILE):
+        return False
+    try:
+        with open(_PAID_VOICES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return voice_id in data.get("paid_voices", [])
+    except Exception:
+        return False
+
+
+def mark_voice_paid(voice_id: str, reason: str = ""):
+    """Danh dau voice can paid account -> khong thu voi free master nua."""
+    data = {"paid_voices": [], "notes": {}}
+    if os.path.exists(_PAID_VOICES_FILE):
+        try:
+            with open(_PAID_VOICES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    if voice_id not in data["paid_voices"]:
+        data["paid_voices"].append(voice_id)
+    data["notes"][voice_id] = reason[:200]
+    data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(_PAID_VOICES_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+

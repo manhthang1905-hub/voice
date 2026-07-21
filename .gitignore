@@ -18,3 +18,9 @@ crash.log
 
 # Shortcut tao boi setup (may-rieng)
 START_GUI.lnk
+
+# Mode C - files tam va tool phan tich (khong push)
+_extract/
+Elevenlabs TTS Pro Lifetime/
+**/.modec_ckpt/
+*.building.mp3

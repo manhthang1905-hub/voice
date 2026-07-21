@@ -98,6 +98,11 @@ class VoiceRestrictedError(Exception):
     pass
 
 
+class MasterTokenInvalidError(Exception):
+    """Master token chết (invalid/expired) — cần đổi master khác."""
+    pass
+
+
 def check_quota(token: str, proxy: dict = None) -> dict:
     """Query ElevenLabs API trực tiếp để lấy quota thật.
 
@@ -966,6 +971,8 @@ class Convert:
         token: Bearer token hoặc API key (sk_...)
         model_id: override model (nếu None, dùng self.default_model với fallback)
         Returns: MP3 bytes hoặc None
+
+        SMART RETRY: giảm retry từ 8→3 nếu cùng lỗi (creator tier/invalid token).
         """
         if token.startswith("sk_"):
             if model_id:
@@ -1016,7 +1023,13 @@ class Convert:
         except (QuotaExceededError, IPFlaggedError,
                 VoiceNotFoundError, VoiceRestrictedError):
             raise
-        except ElevenLabsError:
+        except ElevenLabsError as e:
+            # BAT LOI "invalid token" -> MasterTokenInvalidError (caller doi master)
+            err_msg = str(e).lower()
+            if any(k in err_msg for k in ("provided authorization header was invalid",
+                                           "invalid_grant", "token_expired",
+                                           "invalid token", "unauthorized")):
+                raise MasterTokenInvalidError(f"Master token invalid: {e}")
             # Loi API that (het quota/disabled/flagged/auth/rate-limit) -> de caller
             # xoay workspace/TK. Studio/Ferndocs dung auth khac nen KHONG cuu duoc.
             raise
@@ -1034,6 +1047,10 @@ class Convert:
                 VoiceNotFoundError, VoiceRestrictedError):
             raise
         except Exception as studio_err:
+            # BAT LOI "creator tier" -> VoiceRestrictedError
+            studio_msg = str(studio_err).lower()
+            if "creator tier" in studio_msg or "you need to be on the creator tier" in studio_msg:
+                raise VoiceRestrictedError(f"Voice cần Creator tier: {studio_err}")
             log.warning(
                 f"Convert: Studio API fail, thu Ferndocs: {str(studio_err)[:120]}")
 

@@ -23,3 +23,7 @@ langdetect>=1.0.9   # Layer 3 (Google port)
 
 # (Tuy chon) Tao phu de SRT - chi cai neu bat 'Tu tao phu de SRT'
 # faster-whisper>=1.0
+
+# Mode C (anonymous TTS - khong can master)
+camoufox[geoip]>=0.5.4
+playwright>=1.40

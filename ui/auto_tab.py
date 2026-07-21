@@ -107,11 +107,14 @@ class AutoWorker(QThread):
     scan_done = pyqtSignal()              # 1 lượt scan xong
     cycle_done = pyqtSignal(int)          # seconds until next scan
 
-    def __init__(self, voice_dir, poll_interval=300, stable_wait=10):
+    def __init__(self, voice_dir, poll_interval=300, stable_wait=10,
+                 mode_c=False, mode_c_browsers=2):
         super().__init__()
         self.voice_dir = voice_dir
         self.poll_interval = poll_interval
         self.stable_wait = stable_wait
+        self.mode_c = mode_c                    # True -> tao voice qua anonymous (khong master)
+        self.mode_c_browsers = mode_c_browsers  # so Chrome song song
         self._stopped = False
         self._converting = False
         self._convert_done_flag = False
@@ -207,11 +210,17 @@ class AutoWorker(QThread):
                 f"\n  🎙 {folder_name}: {len(pending_files)} file"
                 f" (voice: {voice_id[:12]}...)")
 
-            # Gửi batch convert
-            # files format: [(row_idx, filepath)]
-            file_list = [(i, f) for i, f in enumerate(pending_files)]
             output_dir = folder_path  # MP3 cùng thư mục TXT
 
+            # === MODE C (anonymous): tao voice khong master, chay ngay trong worker nay ===
+            if self.mode_c:
+                self._convert_mode_c(folder_name, voice_id, pending_files, output_dir)
+                if self._stopped:
+                    return
+                continue
+
+            # === MODE MASTER (cu): gui batch cho VoiceWorker ===
+            file_list = [(i, f) for i, f in enumerate(pending_files)]
             self._converting = True
             self._convert_done_flag = False
             self._convert_timeout = False
@@ -234,6 +243,42 @@ class AutoWorker(QThread):
                 return
 
         self.scan_done.emit()
+
+    def _convert_mode_c(self, folder_name, voice_id, pending_files, output_dir):
+        """Tao voice qua Mode C (anonymous). BEN BI: 1 file loi -> bo qua, lam file khac.
+
+        Tai dung 1 ModeCEngine cho ca folder (cung voice_id) -> pool Chrome + 4G chung.
+        """
+        try:
+            from core.mode_c_engine import ModeCEngine, generate_file, kill_orphan_browsers
+        except Exception as e:
+            self.log_signal.emit(f"  ❌ Mode C khong load duoc: {str(e)[:80]}")
+            return
+
+        kill_orphan_browsers()   # don process rac tu phien truoc
+        engine = ModeCEngine(
+            voice_id=voice_id, model_id="eleven_v3", language_code="vi",
+            use_4g=True, n_browsers=self.mode_c_browsers, headless=True,
+            on_log=lambda m: self.log_signal.emit(f"  {m}"))
+
+        ok = 0
+        for txt_path in pending_files:
+            if self._stopped:
+                break
+            base = os.path.basename(txt_path)
+            try:
+                generate_file(engine, txt_path, output_dir)
+                ok += 1
+            except Exception as e:
+                # File loi -> ghi log + BO QUA (khong treo hang doi). Checkpoint giu
+                # chunk da xong -> luot sau lam tiep.
+                self.log_signal.emit(f"  ⚠ {base}: loi ({str(e)[:80]}) -> bo qua, lam file khac")
+        try:
+            engine.cancel()
+            kill_orphan_browsers()   # don process sau khi xong folder
+        except Exception:
+            pass
+        self.log_signal.emit(f"  ✅ {folder_name}: {ok}/{len(pending_files)} file OK (Mode C)")
 
     def _split_txt(self, folder_map, voice_map):
         """Copy TXT gốc vào folder kênh (check ổn định)."""
@@ -472,6 +517,27 @@ class AutoSettingsDialog(QDialog):
         self.sp_pworkers.setToolTip("Số chunk generate cùng lúc (2-6).")
         form.addRow("  Số chunk song song:", self.sp_pworkers)
 
+        # === MODE C (anonymous - khong can master/TK) ===
+        self.chk_mode_c = QCheckBox("🆕 MODE C: Tạo voice KHÔNG cần tài khoản (anonymous + 4G)")
+        self.chk_mode_c.setToolTip(
+            "Tạo voice qua web demo elevenlabs.io (không đăng nhập). KHÔNG cần master/TK.\n"
+            "- Dùng Chrome sạch (Camoufox) mint token + gửi qua 4G.\n"
+            "- Tự xoay IP 4G sau 15 request, tự đổi Chrome khi lỗi.\n"
+            "- Giới hạn 1000 ký tự/chunk (tự chia). Cần 4G proxy đang chạy.\n"
+            "BẬT = bỏ qua hoàn toàn đường master, chỉ dùng anonymous.")
+        self.chk_mode_c.setChecked(bool(c.get("mode_c_enabled", True)))
+        self.chk_mode_c.setStyleSheet("font-weight:bold; color:#8e44ad;")
+        form.addRow("", self.chk_mode_c)
+
+        self.sp_mode_c_browsers = QSpinBox()
+        self.sp_mode_c_browsers.setRange(1, 8)
+        self.sp_mode_c_browsers.setValue(int(c.get("mode_c_browsers", 3)))
+        self.sp_mode_c_browsers.setToolTip(
+            "Số Chrome (Camoufox) chạy song song để ra voice nhanh (1-8).\n"
+            "Máy khỏe -> tăng lên (3-6) để mint token song song, nhanh hơn nhiều.\n"
+            "Chung 1 IP 4G (16 request/IP -> tự xoay). Mỗi Chrome ~200MB RAM.")
+        form.addRow("  Số Chrome song song (Mode C):", self.sp_mode_c_browsers)
+
         self.chk_maint = QCheckBox("🤖 Tự bảo trì nền (quét quota + reset + cảnh báo)")
         self.chk_maint.setToolTip(
             "Tool 24/7: định kỳ quét quota thật, lưu ngày reset, cảnh báo cạn nguồn.\n"
@@ -554,6 +620,8 @@ class AutoSettingsDialog(QDialog):
         c.set("auto_create_srt", self.chk_srt.isChecked())
         c.set("parallel_chunks", self.chk_parallel.isChecked())
         c.set("parallel_chunk_workers", self.sp_pworkers.value())
+        c.set("mode_c_enabled", self.chk_mode_c.isChecked())
+        c.set("mode_c_browsers", self.sp_mode_c_browsers.value())
         c.set("auto_maintenance", self.chk_maint.isChecked())
         c.set("maintenance_interval_hours", self.sp_maint_h.value())
         c.set("auto_relink", self.chk_relink.isChecked())
@@ -809,10 +877,16 @@ class AutoTab(QWidget):
 
         poll = int(self.config.get("poll_interval", 300))
         stable = int(self.config.get("stable_wait", 10))
+        mode_c = bool(self.config.get("mode_c_enabled", True))
+        mode_c_browsers = int(self.config.get("mode_c_browsers", 3))
+        if mode_c:
+            self._log("🆕 MODE C (anonymous, khong master) DANG BAT")
         self.auto_worker = AutoWorker(
             voice_dir=voice_dir,
             poll_interval=poll,
             stable_wait=stable,
+            mode_c=mode_c,
+            mode_c_browsers=mode_c_browsers,
         )
         self.auto_worker.log_signal.connect(self._log)
         self.auto_worker.sheet_loaded.connect(self._on_sheet_loaded)

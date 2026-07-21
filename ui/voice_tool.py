@@ -36,7 +36,7 @@ MAX_CHUNK_CJK = 3000           # ja/ko (ky tu day hon)
 from core.api_client import AVAILABLE_MODELS, OUTPUT_FORMATS
 from core.convert import (
     QuotaExceededError, IPFlaggedError, VoiceNotFoundError,
-    VoiceRestrictedError, check_quota, get_voice_info,
+    VoiceRestrictedError, MasterTokenInvalidError, check_quota, get_voice_info,
     extract_supported_languages, LANGUAGE_NAMES,
 )
 from utils.config import Config
@@ -2452,9 +2452,10 @@ class MaintenanceWorker(QThread):
     log_signal = pyqtSignal(str)
     done = pyqtSignal(dict)
 
-    def __init__(self, do_relink=False):
+    def __init__(self, do_relink=False, do_health_check=False):
         super().__init__()
         self.do_relink = do_relink
+        self.do_health_check = do_health_check
         self._stop = False
 
     def cancel(self):
@@ -2466,10 +2467,38 @@ class MaintenanceWorker(QThread):
             res = run_maintenance(
                 on_log=lambda m: self.log_signal.emit(m),
                 should_stop=lambda: self._stop,
-                do_relink=self.do_relink)
+                do_relink=self.do_relink,
+                do_health_check=self.do_health_check)
             self.done.emit(res or {})
         except Exception as e:
             self.log_signal.emit(f"[Maintenance] loi: {str(e)[:100]}")
+
+
+class HealthCheckWorker(QThread):
+    """Kiem tra suc khoe master (background, 5 phut/lan) -> phat hien + loai master chet.
+    Tiet kiem retry voi master chet (tu 8 lan -> 0 lan)."""
+    log_signal = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._stop = False
+
+    def cancel(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            from core.master_pool import get_shared_pool
+            pool = get_shared_pool()
+            result = pool.health_check_all(on_log=lambda m: self.log_signal.emit(m))
+            if result["dead"]:
+                self.log_signal.emit(f"[HealthCheck] Loai {len(result['dead'])} master chet")
+                pool.auto_remove_dead_masters()
+            elif result["ok"]:
+                self.log_signal.emit(f"[HealthCheck] {len(result['ok'])} master OK")
+        except Exception as e:
+            self.log_signal.emit(f"[HealthCheck] loi: {str(e)[:80]}")
+
 
 
 class PoolWarmerWorker(QThread):
@@ -3404,7 +3433,8 @@ def main():
             if mw and mw.isRunning():
                 return
             window._maint_worker = MaintenanceWorker(
-                do_relink=bool(cfg.get("auto_relink", False)))
+                do_relink=bool(cfg.get("auto_relink", False)),
+                do_health_check=True)  # BAT health-check master
             window._maint_worker.log_signal.connect(lambda m: log.info(m))
             window._maint_worker.start()
         except Exception as _e:
@@ -3419,6 +3449,24 @@ def main():
     window._maint_timer.start(max(1, int(_interval_h * 3600 * 1000)))
     # Chay 1 lan ~5 phut sau khi mo tool (sau khi recover master xong)
     QTimer.singleShot(300000, _maybe_maintenance)
+
+    # === HEALTH-CHECK MASTER (5 PHUT/LAN) ===
+    # Phat hien + loai master chet TRUOC KHI generate -> tiet kiem retry 8 lan.
+    def _health_check_master():
+        try:
+            hc = getattr(window, "_health_check_worker", None)
+            if hc and hc.isRunning():
+                return
+            window._health_check_worker = HealthCheckWorker()
+            window._health_check_worker.log_signal.connect(lambda m: log.info(m))
+            window._health_check_worker.start()
+        except Exception as _e:
+            print(f"[HealthCheck] khong khoi dong duoc: {_e}")
+
+    window._health_timer = QTimer()
+    window._health_timer.timeout.connect(_health_check_master)
+    window._health_timer.start(5 * 60 * 1000)  # 5 phut/lan
+    QTimer.singleShot(60000, _health_check_master)  # lan dau ~1 phut sau khi mo
 
     # === DUY TRI DANH SACH TK O NEN ===
     # - Nap nhanh luc mo (co token ngay).
