@@ -29,20 +29,27 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _find_tool(name: str) -> str:
-    found = shutil.which(name)
-    if found:
-        return found
+    # UU TIEN ffmpeg BUNDLED trong du an TRUOC PATH.
+    # Ly do: PATH may co the con entry cu/hong (vd D:\upload\ffmpeg\bin thieu ffmpeg.exe
+    # hoac tro toi file khong ton tai tren may khac) -> shutil.which tra ve duong dan
+    # hong -> pydub goi ffprobe -> WinError 2 khi merge. Bo ffmpeg/ (copy y nguyen theo
+    # du an) chac chan co du 3 file -> dung truoc, on dinh moi may.
     candidates = [
-        # ffmpeg bundled trong chính dự án (ưu tiên)
         os.path.join(_PROJECT_ROOT, "ffmpeg", "bin", f"{name}.exe"),
         os.path.join(_PROJECT_ROOT, "ffmpeg", "bin", name.upper() + ".EXE"),
         os.path.join(_PROJECT_ROOT, "tools", "ffmpeg", "bin", f"{name}.exe"),
-        # fallback: các vị trí cài chung trên máy
-        os.path.join("D:\\ffmpeg", "bin", f"{name}.exe"),
     ]
     for path in candidates:
         if os.path.exists(path):
             return path
+    # Khong co bundled -> moi dung PATH
+    found = shutil.which(name)
+    if found:
+        return found
+    # Cuoi cung: cac vi tri cai chung tren may
+    fallback = os.path.join("D:\\ffmpeg", "bin", f"{name}.exe")
+    if os.path.exists(fallback):
+        return fallback
     return name
 
 
