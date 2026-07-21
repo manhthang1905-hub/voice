@@ -1,0 +1,12 @@
+{
+  "api_key": "mimi-4g-proxy-2026",
+  "base_port": 10001,
+  "phones": [
+    {
+      "device_id": "ES2BA80614012869",
+      "port": 10001,
+      "bind_ip": null,
+      "name": "Nokia 3.1"
+    }
+  ]
+}

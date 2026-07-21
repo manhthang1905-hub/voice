@@ -3490,6 +3490,18 @@ def main():
             screen.y() + (screen.height() - window.height()) // 2,
         )
 
+    # === TU DONG CHAY 4G SERVER (neu may co dien thoai) — khoi phai chay .bat rieng ===
+    # 4G nay dung CHO tool voice, nen tool tu lo. Chay nen ngay (truoc Mode C can 4G).
+    def _start_4g_server():
+        try:
+            from core.fourg_server import ensure_4g_server
+            st = ensure_4g_server(on_log=lambda m: log.info(m))
+            log.info(f"[4G] auto-start: {st}")
+        except Exception as _e:
+            print(f"[4G] auto-start loi: {_e}")
+    import threading as _th
+    _th.Thread(target=_start_4g_server, daemon=True).start()
+
     # === TU DONG KHOI PHUC MASTER HET HAN (chay nen, 5s sau khi mo tool) ===
     # Giu tham chieu tren window de worker khong bi GC giua chung.
     def _start_master_recover():

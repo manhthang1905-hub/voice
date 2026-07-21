@@ -24,3 +24,8 @@ _extract/
 Elevenlabs TTS Pro Lifetime/
 **/.modec_ckpt/
 *.building.mp3
+
+# 4G server logs/cache (giu code, bo log)
+fourg/*.log
+fourg/__pycache__/
+fourg/127.0.0.1
