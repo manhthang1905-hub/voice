@@ -141,6 +141,8 @@ REFRESH_BROWSER_EVERY = 30
 MAX_CHUNK_ATTEMPTS = 6
 # Cooldown giua 2 lan xoay IP (giay) — tranh xoay lien tuc khi nhieu thread cung flag
 ROTATE_COOLDOWN = 8
+# So lan recover 4G that bai lien tiep -> coi 4G CHET HAN (dien thoai mat song) -> dung
+MAX_RECOVER_FAILS = 3
 
 # Tai nguyen 1 Camoufox chiem (uoc tinh de tinh so Chrome linh hoat)
 RAM_PER_CHROME_MB = 350       # RAM 1 Camoufox (~250-350MB) + buffer
@@ -194,6 +196,9 @@ class _Shared4G:
         self.budget_lock = threading.Lock()
         self._p4g = None
         self.session_fresh = False  # da lam SACH dau phien chua (xoay IP moi + reset)
+        self.recover_fails = 0      # so lan recover 4G that bai lien tiep
+        self.p4g_dead = False       # 4G chet han (dien thoai mat song) -> dung
+        self.last_recover = 0.0
 
     def p4g(self):
         if self._p4g is None:
@@ -222,9 +227,12 @@ def get_shared_4g():
 def begin_session():
     """Danh dau BAT DAU 1 phien tao voice moi -> lan start_file dau se lam SACH
     (xoay IP moi + kill browser cu). Goi khi bam Start / bat dau job queue / luot Auto.
+    Reset co 4G-dead (phien moi cho 4G co the da hoi lai).
     """
     sh = get_shared_4g()
     sh.session_fresh = False
+    sh.p4g_dead = False
+    sh.recover_fails = 0
 
 
 class ModeCEngine:
@@ -262,6 +270,9 @@ class ModeCEngine:
     def recover_4g(self):
         """Luong socks5 4G reset (ConnectionReset) -> scan/reconnect. Thread-safe +
         chong spam: nhieu slot cung loi chi scan 1 lan trong 15s.
+
+        Neu recover THAT BAI nhieu lan lien tiep -> 4G CHET HAN (dien thoai mat song data)
+        -> set _p4g_dead de engine DUNG CA FOLDER (khong cay retry vo ich hang chuc phut).
         """
         if not self._p4g:
             return
@@ -274,10 +285,18 @@ class ModeCEngine:
                 ok = self._p4g.ensure_alive(on_log=self.on_log)
                 if ok:
                     self._sh.cur_ip = self._p4g.get_ip() or self._sh.cur_ip
+                    self._sh.recover_fails = 0     # thong lai -> reset dem
                     self.on_log(f"  ✓ 4G reconnect OK (IP {self._sh.cur_ip})")
                 else:
-                    self.on_log("  ⚠ 4G VAN chua thong sau scan — kiem tra tab '4G Proxy' "
-                                "(dien thoai/ADB/EveryProxy)")
+                    self._sh.recover_fails = getattr(self._sh, "recover_fails", 0) + 1
+                    self.on_log(f"  ⚠ 4G VAN chua thong sau scan (lan {self._sh.recover_fails}) "
+                                "— dien thoai co the MAT SONG DATA")
+                    if self._sh.recover_fails >= MAX_RECOVER_FAILS:
+                        self._sh.p4g_dead = True
+                        self.on_log(
+                            "  🛑 4G CHET HAN (mat song data) -> DUNG. "
+                            "KIEM TRA DIEN THOAI: bat Du lieu di dong / kiem tra SIM con data / "
+                            "khoi dong lai dien thoai. (Khong phai loi tool)")
             except Exception as e:
                 self.on_log(f"  ⚠ recover 4G loi: {str(e)[:60]}")
 
@@ -456,6 +475,9 @@ class _BrowserSlot:
         for attempt in range(MAX_CHUNK_ATTEMPTS):
             if self.engine._cancelled:
                 raise Exception("cancelled")
+            # 4G chet han (dien thoai mat song) -> dung ngay, khong cay retry vo ich
+            if self.engine._sh and getattr(self.engine._sh, "p4g_dead", False):
+                raise Exception("4G chet han (dien thoai mat song data) - dung folder")
             t0 = time.time()
             try:
                 # Xin suat IP (xoay CHU DONG neu IP da dung >= 15 req) -> lay gen + proxy MOI NHAT

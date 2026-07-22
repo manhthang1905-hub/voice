@@ -272,13 +272,16 @@ class AutoWorker(QThread):
         for txt_path in pending_files:
             if self._stopped:
                 break
+            # 4G chet han (dien thoai mat song) -> DUNG ca loat, khong cay file tiep
+            if getattr(engine._sh, "p4g_dead", False) if engine._sh else False:
+                self.log_signal.emit("  🛑 4G chet (dien thoai mat song) -> dung luot nay, "
+                                     "cho 4G hoi (kiem tra dien thoai).")
+                break
             base = os.path.basename(txt_path)
             try:
                 generate_file(engine, txt_path, output_dir)
                 ok += 1
             except Exception as e:
-                # File loi -> ghi log + BO QUA (khong treo hang doi). Checkpoint giu
-                # chunk da xong -> luot sau lam tiep.
                 self.log_signal.emit(f"  ⚠ {base}: loi ({str(e)[:80]}) -> bo qua, lam file khac")
         try:
             engine.cancel()
