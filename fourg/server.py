@@ -2,6 +2,20 @@
 GUI: chay server_gui.py
 Port API: 19800 | Port Gateway: 5000
 """
+# === AN CUA SO CMD DEN cua moi subprocess (adb, ipconfig, powershell...) ===
+# Server 4G goi adb rat nhieu -> moi lan hien 1 cua so console den, phien.
+# Patch Popen them CREATE_NO_WINDOW -> chay an hoan toan (giong run.py).
+import os as _os
+if _os.name == "nt":
+    import subprocess as _sp
+    _CNW = 0x08000000
+    _orig_init = _sp.Popen.__init__
+    def _patched_init(self, *a, **k):
+        if k.get("creationflags", 0) == 0:
+            k["creationflags"] = _CNW
+        _orig_init(self, *a, **k)
+    _sp.Popen.__init__ = _patched_init
+
 from flask import Flask, jsonify, request
 from proxy_manager import ProxyManager
 from smart_pool import SmartPool

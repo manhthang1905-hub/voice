@@ -13,6 +13,17 @@ import socket
 import struct
 import threading
 import subprocess
+
+# An cua so CMD den cua moi adb exec-out (server 4G goi lien tuc).
+import os as _os
+if _os.name == "nt":
+    _CNW = 0x08000000
+    _orig = subprocess.Popen.__init__
+    def _patched(self, *a, **k):
+        if k.get("creationflags", 0) == 0:
+            k["creationflags"] = _CNW
+        _orig(self, *a, **k)
+    subprocess.Popen.__init__ = _patched
 import select
 import sys
 import os

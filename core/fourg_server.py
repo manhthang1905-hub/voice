@@ -85,7 +85,12 @@ def ensure_4g_server(on_log=lambda *_: None) -> str:
         return "no_device"
 
     # 3. Chay: TCP relay (LAN) + server.py (API + gateway + adb socks5)
-    python = sys.executable  # pythonw.exe hoac python.exe dang chay tool
+    # UU TIEN pythonw.exe (khong cua so) du tool dang chay bang python.exe -> tranh CMD den.
+    python = sys.executable
+    if os.name == "nt" and python.lower().endswith("python.exe"):
+        _pw = os.path.join(os.path.dirname(python), "pythonw.exe")
+        if os.path.exists(_pw):
+            python = _pw
     on_log("[4G] May co dien thoai -> tu chay 4G server nen...")
 
     # TCP relay: 0.0.0.0:10002 -> 127.0.0.1:10001 (cho may phu dung qua LAN)
