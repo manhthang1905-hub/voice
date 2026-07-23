@@ -561,6 +561,12 @@ class _BrowserSlot:
                 msg = str(e).lower()
                 if "text_too_long" in msg or "validation" in msg:
                     raise    # loi that su -> khong retry
+                # GREENLET CHET (browser crash): thread nay KHONG mo lai Camoufox duoc nua
+                # -> RAISE NGAY (khong retry vo ich 6 lan) -> worker se spawn thread moi.
+                if any(k in msg for k in ("asyncio loop", "different thread", "greenlet",
+                                          "has been closed", "khong mo duoc chrome",
+                                          "session chua open")):
+                    raise Exception(f"greenlet_dead: {str(e)[:80]}")
                 last_err = e
                 self.engine.stat["retries"] += 1
                 # LOI KET NOI PROXY 4G (ConnectionReset/aborted/timeout socks5): luong 4G
@@ -644,8 +650,23 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
         errors = []
         err_lock = threading.Lock()
 
+        # SELF-HEAL: neu greenlet Camoufox chet (browser crash -> loi 'Sync API inside
+        # asyncio loop' / 'different thread' / 'browser has been closed') thi thread WORKER
+        # do KHONG bao gio mo lai Camoufox duoc -> phai THOAT thread + tra chunk ve queue +
+        # spawn worker MOI (thread moi = greenlet sach). Dem so lan de tranh vong lap vo han.
+        GREENLET_DEAD_KEYS = ("asyncio loop", "different thread", "greenlet",
+                              "has been closed", "khong mo duoc chrome", "session chua open")
+        worker_respawns = {"n": 0}
+        respawn_lock = threading.Lock()
+        MAX_RESPAWN = n_slots * 8
+
+        def _is_greenlet_dead(msg):
+            m = str(msg).lower()
+            return any(k in m for k in GREENLET_DEAD_KEYS)
+
         def worker(slot_id):
             slot = _BrowserSlot(engine, slot_id)
+            greenlet_dead = False
             try:
                 while not engine._cancelled:
                     try:
@@ -657,8 +678,6 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
                         audio = slot.make_audio(chunk, tag=tag)
                         results[idx] = audio
                         engine.stat["chunk_ok"] += 1
-                        # Luu checkpoint NGAY, ATOMIC (ghi .tmp roi rename) + fsync
-                        # -> khong bao gio co checkpoint ghi do dang khi crash.
                         try:
                             cp = _ckpt_path(idx)
                             tmp = cp + ".tmp"
@@ -669,20 +688,45 @@ def generate_file(engine: ModeCEngine, txt_path: str, output_dir: str) -> str:
                             os.replace(tmp, cp)
                         except Exception:
                             pass
+                        q.task_done()
                     except Exception as e:
+                        if _is_greenlet_dead(e):
+                            # Greenlet chet -> thread nay VO DUNG. Tra chunk ve queue,
+                            # thoat thread, spawn worker moi (greenlet sach).
+                            q.put((idx, chunk))
+                            q.task_done()
+                            greenlet_dead = True
+                            engine.on_log(f"  ♻ slot{slot_id}: browser hong (greenlet chet) "
+                                          f"-> thay Chrome moi (thread moi)")
+                            break
                         with err_lock:
                             errors.append((idx, str(e)[:120]))
                         engine.on_log(f"  ❌ {tag} THAT BAI: {str(e)[:100]}")
-                    finally:
                         q.task_done()
             finally:
                 slot.close()
+            # Neu thoat do greenlet chet + con chunk -> spawn worker thay the
+            if greenlet_dead and not engine._cancelled and not q.empty():
+                with respawn_lock:
+                    if worker_respawns["n"] < MAX_RESPAWN:
+                        worker_respawns["n"] += 1
+                        nt = threading.Thread(target=worker, args=(slot_id,), daemon=True)
+                        nt.start()
+                        _extra_threads.append(nt)
 
+        _extra_threads = []
         threads = [threading.Thread(target=worker, args=(i+1,)) for i in range(n_slots)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+        # Cho cac worker respawn xong (browser crash -> thay thread moi)
+        while True:
+            alive = [t for t in _extra_threads if t.is_alive()]
+            if not alive:
+                break
+            for t in alive:
+                t.join(timeout=5)
 
         if not all(r is not None for r in results):
             missing = [i+1 for i, r in enumerate(results) if r is None]
