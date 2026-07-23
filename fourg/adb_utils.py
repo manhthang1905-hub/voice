@@ -73,18 +73,49 @@ def is_airplane_on(device_id):
     out = run_adb(device_id, 'shell', 'settings', 'get', 'global', 'airplane_mode_on')
     return out.strip() == '1'
 
+def _find_airplane_toggle(device_id):
+    """Tim TOA DO tam toggle airplane tu UI dump (khong hardcode - moi may/ROM khac).
+    -> (x, y) hoac None."""
+    try:
+        xml = _dump_ui_xml_generic(device_id)
+        if not xml:
+            return None
+        # Tim node Switch (toggle) - thuong la switch duy nhat tren trang airplane
+        for m in re.finditer(r'class="android\.widget\.Switch"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml):
+            x1, y1, x2, y2 = map(int, m.groups())
+            return ((x1 + x2) // 2, (y1 + y2) // 2)
+    except Exception:
+        pass
+    return None
+
+
+def _dump_ui_xml_generic(device_id):
+    try:
+        run_adb(device_id, 'shell', 'uiautomator', 'dump', '/sdcard/_ap.xml')
+        out = subprocess.run(ADB_BASE + ['-s', device_id, 'shell', 'cat', '/sdcard/_ap.xml'],
+                             timeout=10, creationflags=CREATE_NO_WINDOW, capture_output=True)
+        return out.stdout.decode('utf-8', errors='ignore')
+    except Exception:
+        return ""
+
+
 def toggle_airplane(device_id, on=True):
     """Bật/tắt airplane mode qua UI tap (Nokia 3.1 cần cách này, broadcast/cmd cần root).
 
-    Mở Settings > Airplane Mode, tap toggle.
+    Mở Settings > Airplane Mode, TIM toggle tu UI (khong hardcode toa do sai) roi tap.
     """
+    # Wake + unlock truoc (dialog/toggle chi bam duoc khi man hinh sang)
+    run_adb(device_id, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+    run_adb(device_id, 'shell', 'wm', 'dismiss-keyguard')
     # Mở trang airplane mode settings
     run_adb(device_id, 'shell', 'am', 'start', '-a',
             'android.settings.AIRPLANE_MODE_SETTINGS')
-    time.sleep(1)
+    time.sleep(1.5)
 
-    # Tap toggle airplane (bounds [594,728][688,782] trên Nokia 3.1)
-    run_adb(device_id, 'shell', 'input', 'tap', '641', '755')
+    # TIM toggle tu UI (dung toa do that). Fallback (641,717) neu khong tim thay
+    # (da do tren Nokia 3.1: toggle o [594,690][688,744] -> tam 641,717).
+    point = _find_airplane_toggle(device_id) or (641, 717)
+    run_adb(device_id, 'shell', 'input', 'tap', str(point[0]), str(point[1]))
     time.sleep(1)
 
 
@@ -100,18 +131,41 @@ def _re_forward_adb(device_id, port=10001, phone_port=1080):
         pass
 
 
+def _airplane_is_on(device_id):
+    try:
+        out = run_adb(device_id, 'shell', 'settings', 'get', 'global', 'airplane_mode_on')
+        return (out or '').strip() == '1'
+    except Exception:
+        return None
+
+
 def rotate_ip(device_id, wait=25):
     """Đổi IP bằng airplane mode ON/OFF + re-forward ADB.
+
+    QUAN TRONG: VERIFY airplane THUC SU tat sau toggle. Neu tap truot -> airplane ket
+    BAT -> data CHET (bug da gap). -> retry tat toi 3 lan cho toi khi airplane_mode_on=0.
     Returns: IP mới hoặc None
     """
     old_ip = get_device_ip(device_id)
 
-    # Bật airplane (tap toggle)
+    # Bật airplane (tap toggle) — verify da BAT
     toggle_airplane(device_id, on=True)
-    time.sleep(5)
+    time.sleep(2)
+    for _ in range(3):
+        if _airplane_is_on(device_id):
+            break
+        toggle_airplane(device_id, on=True)
+        time.sleep(2)
+    time.sleep(4)
 
-    # Tắt airplane (tap toggle lại)
+    # Tắt airplane (tap toggle lại) — VERIFY da TAT (khong de ket BAT lam chet data)
     toggle_airplane(device_id, on=False)
+    time.sleep(2)
+    for _ in range(3):
+        if _airplane_is_on(device_id) is False:
+            break
+        toggle_airplane(device_id, on=False)
+        time.sleep(2)
 
     # Re-setup ADB forward (airplane mode có thể reset)
     time.sleep(3)
@@ -211,18 +265,29 @@ def dismiss_usb_dialog(device_id):
 def has_data_signal(device_id):
     """Dien thoai co song DATA thuc su khong? (khac EveryProxy/ADB).
 
-    Doc mDataRegState tu telephony: 0/IN_SERVICE = co song; 3/POWER_OFF = mat song.
-    -> True neu co song data, False neu mat.
+    LUU Y (bug da gap): may 2 SIM -> co NHIEU mDataRegState/mDataConnectionState (moi khe 1).
+    Khe trong = POWER_OFF, khe co SIM = connected. PHAI check BAT KY khe nao co data,
+    khong chi doc khe dau (de tuong mat song oan -> dung oan).
+
+    Cach chac nhat: mDataConnectionState=2 (CONNECTED) o BAT KY khe nao -> co data.
+    -> True neu co data, False neu KHONG khe nao co, None neu khong doc duoc.
     """
     try:
-        out = run_adb(device_id, 'shell', 'dumpsys', 'telephony.registry')
-        # mDataRegState=0(IN_SERVICE) tot ; =1 out of service ; =3 POWER_OFF
-        m = re.search(r'mDataRegState=(\d)', out or '')
-        if m:
-            return m.group(1) == '0'
+        out = run_adb(device_id, 'shell', 'dumpsys', 'telephony.registry') or ""
+        # mDataConnectionState: 0=disconnected,1=connecting,2=connected,3=suspended
+        conn = [int(m.group(1)) for m in re.finditer(r'mDataConnectionState=(\d)', out)]
+        if any(c == 2 for c in conn):
+            return True
+        # Hoac mDataRegState=0 (IN_SERVICE) o bat ky khe nao
+        regs = [m.group(1) for m in re.finditer(r'mDataRegState=(\d)', out)]
+        if any(r == '0' for r in regs):
+            return True
+        # Co doc duoc nhung KHONG khe nao co data
+        if conn or regs:
+            return False
     except Exception:
         pass
-    return None   # khong doc duoc -> khong ket luan
+    return None   # khong doc duoc -> khong ket luan (KHONG dung oan)
 
 
 def heal_device(device_id, everyproxy_port=1080, on_log=lambda *_: None):
