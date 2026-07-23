@@ -324,6 +324,17 @@ class Proxy4G:
         except Exception:
             return {}
 
+    def heal(self, timeout: int = 60) -> dict:
+        """Goi /heal — TU FIX moi loi tren dien thoai (watchdog):
+        dismiss dialog USB (cam lai cap), tu bat EveryProxy, stay-awake, restart forward.
+        -> dict ket qua (hoac {} neu loi).
+        """
+        try:
+            r = req.post(f"{API_BASE}/heal?key={API_KEY}", timeout=timeout)
+            return r.json() if r.status_code == 200 else {}
+        except Exception:
+            return {}
+
     def ensure_alive(self, on_log=lambda *_: None, max_try: int = 2) -> bool:
         """Dam bao 4G THUC SU forward duoc (khong bao chet oan).
 
@@ -346,18 +357,15 @@ class Proxy4G:
             if running and ip:
                 if self.probe_socks5():
                     return True
-                on_log("  ⚠ 4G: API bao OK nhung luong socks5 RESET -> restart forward...")
+                on_log("  ⚠ 4G: API bao OK nhung luong socks5 RESET -> tu HEAL dien thoai...")
             else:
-                on_log(f"  ⚠ 4G chua san sang (running={running}) -> start + scan...")
-            # Restart forward (start + scan) roi test lai
-            try:
-                req.post(f"{API_BASE}/proxy/{ph['id']}/start?key={API_KEY}", timeout=10)
-            except Exception:
-                pass
-            self.scan_devices()
+                on_log(f"  ⚠ 4G chua san sang (running={running}) -> tu HEAL...")
+            # TU HEAL: dismiss dialog USB + bat EveryProxy + stay-awake + restart forward
+            # (manh hon scan don thuan — xu ly ca truong hop cam lai cap/EveryProxy chet).
+            self.heal()
             time.sleep(3)
             if self.probe_socks5():
-                on_log(f"  ✓ 4G luong thong lai sau scan (IP {self.get_ip()})")
+                on_log(f"  ✓ 4G luong thong lai sau heal (IP {self.get_ip()})")
                 return True
         return False
 

@@ -132,6 +132,30 @@ def scan():
         api_log_add(f"SCAN error: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/heal', methods=['POST'])
+@require_auth
+def heal():
+    """TU FIX moi loi tren dien thoai (watchdog): dialog USB, EveryProxy, stay-awake.
+
+    Goi khi tool phat hien 4G loi. -> ket qua heal + restart forward.
+    """
+    try:
+        from adb_utils import heal_device
+        results = []
+        for dev in manager.phones.keys():
+            r = heal_device(dev, everyproxy_port=manager.EVERYPROXY_PORT,
+                            on_log=api_log_add)
+            results.append({"device": dev, **r})
+        # Sau khi heal -> restart forward (adb socks5) cho cac device
+        try:
+            manager.start_all()
+        except Exception:
+            pass
+        return jsonify({"ok": True, "heal": results})
+    except Exception as e:
+        api_log_add(f"HEAL error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/start', methods=['POST'])
 @require_auth
 def start_all():

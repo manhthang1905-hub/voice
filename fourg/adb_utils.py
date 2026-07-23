@@ -185,6 +185,88 @@ def setup_stay_awake(device_id):
     # Tắt screen timeout
     run_adb(device_id, 'shell', 'settings', 'put', 'system', 'screen_off_timeout', '2147483647')
 
+
+def dismiss_usb_dialog(device_id):
+    """Tu dismiss dialog USB ('Dung USB de...') khi cam lai cap / mat dien.
+
+    Khi cam lai cap USB, Android hien dialog hoi che do USB -> chan ADB/EveryProxy.
+    Ham nay: wake + unlock + dismiss dialog (bam nut mac dinh / BACK), va ep USB=mtp.
+    Khong can root.
+    """
+    try:
+        # 1. Wake + unlock man hinh (dialog thuong hien khi man hinh sang)
+        run_adb(device_id, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+        run_adb(device_id, 'shell', 'wm', 'dismiss-keyguard')
+        # 2. Neu co dialog USB -> BACK de dismiss (giu che do mac dinh)
+        win = run_adb(device_id, 'shell', 'dumpsys', 'window', 'windows')
+        low = (win or '').lower()
+        if any(k in low for k in ('usbconfirm', 'usbconnection', 'usbhandler',
+                                   'com.android.systemui/.usb')):
+            run_adb(device_id, 'shell', 'input', 'keyevent', 'KEYCODE_BACK')
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+
+def has_data_signal(device_id):
+    """Dien thoai co song DATA thuc su khong? (khac EveryProxy/ADB).
+
+    Doc mDataRegState tu telephony: 0/IN_SERVICE = co song; 3/POWER_OFF = mat song.
+    -> True neu co song data, False neu mat.
+    """
+    try:
+        out = run_adb(device_id, 'shell', 'dumpsys', 'telephony.registry')
+        # mDataRegState=0(IN_SERVICE) tot ; =1 out of service ; =3 POWER_OFF
+        m = re.search(r'mDataRegState=(\d)', out or '')
+        if m:
+            return m.group(1) == '0'
+    except Exception:
+        pass
+    return None   # khong doc duoc -> khong ket luan
+
+
+def heal_device(device_id, everyproxy_port=1080, on_log=lambda *_: None):
+    """TU FIX moi loi tren dien thoai (watchdog) — mien tool con chay.
+
+    Chuoi phuc hoi theo thu tu:
+      1. Wake + unlock + dismiss dialog USB (cam lai cap/mat dien -> dialog chan).
+      2. Ep USB = mtp (khong hoi lai che do USB).
+      3. Stay-awake (khong tat man hinh).
+      4. Ensure EveryProxy chay (mo app + bat SOCKS neu tat).
+    -> dict {ok, data_signal, everyproxy, note}.
+    """
+    result = {"ok": False, "data_signal": None, "everyproxy": False, "note": ""}
+    # 1. Dialog USB + wake
+    dismiss_usb_dialog(device_id)
+    # 2. Ep USB mtp (tranh hoi lai) — best effort (co the lam adb reconnect ~vai giay)
+    try:
+        run_adb(device_id, 'shell', 'svc', 'usb', 'setFunctions', 'mtp')
+    except Exception:
+        pass
+    # 3. Stay awake
+    try:
+        setup_stay_awake(device_id)
+    except Exception:
+        pass
+    # 4. Data signal
+    result["data_signal"] = has_data_signal(device_id)
+    # 5. EveryProxy
+    try:
+        result["everyproxy"] = ensure_everyproxy(device_id, port=everyproxy_port, wait=8)
+    except Exception:
+        result["everyproxy"] = False
+
+    if result["data_signal"] is False:
+        result["note"] = "Dien thoai MAT SONG DATA (SIM het data / mat mang)"
+    elif not result["everyproxy"]:
+        result["note"] = "EveryProxy chua bat duoc"
+    else:
+        result["ok"] = True
+        result["note"] = "OK"
+    on_log(f"[heal] data={result['data_signal']} everyproxy={result['everyproxy']} "
+           f"-> {result['note']}")
+    return result
+
 def fix_ttl(device_id):
     """Fix TTL = 64 để nhà mạng không biết đang tethering
     CẦN ROOT. Nếu không root thì bỏ qua.
