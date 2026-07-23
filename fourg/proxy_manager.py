@@ -249,17 +249,27 @@ class ProxyManager:
                 device['steps'].append({'step': '4G', 'status': 'ok', 'message': f'IP 4G: {ips_4g[0][0]}'})
 
             # Check EveryProxy — kiểm tra SOCKS5 trên phone
-            everyproxy_ok = False
-            try:
-                # Kiểm tra EveryProxy đang listen port 1080
-                check = subprocess.check_output(
-                    [ADB, '-s', dev_id, 'shell',
-                     f'netstat -tlnp 2>/dev/null | grep ":{self.EVERYPROXY_PORT}" || echo NOTFOUND'],
-                    text=True, timeout=5, creationflags=C).strip()
-                if 'NOTFOUND' not in check and str(self.EVERYPROXY_PORT) in check:
-                    everyproxy_ok = True
-            except:
-                pass
+            def _check_everyproxy():
+                try:
+                    check = subprocess.check_output(
+                        [ADB, '-s', dev_id, 'shell',
+                         f'netstat -tlnp 2>/dev/null | grep ":{self.EVERYPROXY_PORT}" || echo NOTFOUND'],
+                        text=True, timeout=5, creationflags=C).strip()
+                    return 'NOTFOUND' not in check and str(self.EVERYPROXY_PORT) in check
+                except Exception:
+                    return False
+
+            everyproxy_ok = _check_everyproxy()
+            # TU DONG BAT LAI neu EveryProxy tat (user hay phai bat tay -> tu lo).
+            if not everyproxy_ok:
+                try:
+                    from adb_utils import ensure_everyproxy
+                    if ensure_everyproxy(dev_id, port=self.EVERYPROXY_PORT, wait=8):
+                        everyproxy_ok = True
+                        device['steps'].append({'step': 'EveryProxy', 'status': 'ok',
+                            'message': 'Tu bat lai EveryProxy SOCKS (khong can mo tay)'})
+                except Exception:
+                    pass
 
             if everyproxy_ok:
                 device['steps'].append({'step': 'EveryProxy', 'status': 'ok',
