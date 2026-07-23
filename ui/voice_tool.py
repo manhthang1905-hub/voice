@@ -3504,6 +3504,26 @@ def main():
     import threading as _th
     _th.Thread(target=_start_4g_server, daemon=True).start()
 
+    # === WATCHDOG 4G (2 phut/lan): tu heal dien thoai khi loi (mat dien/cam lai cap/
+    # EveryProxy chet...) — mien tool con chay thi 4G tu phuc hoi, khong can canh tay. ===
+    def _watchdog_4g():
+        try:
+            from accounts.proxy import Proxy4G
+            p = Proxy4G()
+            # Chi heal khi luong socks5 KHONG thong (tranh heal vo ich khi dang OK)
+            if not p.probe_socks5(timeout=8):
+                log.info("[Watchdog] 4G loi -> tu heal dien thoai...")
+                p.heal()
+        except Exception as _e:
+            print(f"[Watchdog] loi: {_e}")
+
+    def _tick_watchdog():
+        _th.Thread(target=_watchdog_4g, daemon=True).start()
+
+    window._wd_timer = QTimer()
+    window._wd_timer.timeout.connect(_tick_watchdog)
+    window._wd_timer.start(120000)   # 2 phut/lan
+
     # === TU DONG KHOI PHUC MASTER HET HAN (chay nen, 5s sau khi mo tool) ===
     # Giu tham chieu tren window de worker khong bi GC giua chung.
     def _start_master_recover():
