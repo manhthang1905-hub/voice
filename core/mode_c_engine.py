@@ -282,21 +282,40 @@ class ModeCEngine:
                 return   # vua recover xong -> khoi lam lai
             self._sh.last_recover = now
             try:
-                ok = self._p4g.ensure_alive(on_log=self.on_log)
-                if ok:
+                # HEAL manh (xu ly airplane ket + bat EveryProxy) roi test luong that.
+                heal = self._p4g.heal()
+                time.sleep(3)
+                thong = self._p4g.probe_socks5(timeout=12)
+                if thong:
                     self._sh.cur_ip = self._p4g.get_ip() or self._sh.cur_ip
-                    self._sh.recover_fails = 0     # thong lai -> reset dem
-                    self.on_log(f"  ✓ 4G reconnect OK (IP {self._sh.cur_ip})")
+                    self._sh.recover_fails = 0
+                    self.on_log(f"  ✓ 4G thong lai (IP {self._sh.cur_ip})")
+                    return
+                # Chua thong -> XEM data signal that (heal da doc dung khe SIM + xu ly airplane)
+                data_ok = None
+                try:
+                    for d in (heal.get("heal") or []):
+                        if d.get("data_signal") is True:
+                            data_ok = True
+                        elif d.get("data_signal") is False and data_ok is None:
+                            data_ok = False
+                except Exception:
+                    pass
+                self._sh.recover_fails = getattr(self._sh, "recover_fails", 0) + 1
+                if data_ok is False:
+                    # Data THUC SU chet (heal da tat airplane + doi ma van khong co) -> dung
+                    self._sh.p4g_dead = True
+                    self.on_log(
+                        "  🛑 4G: dien thoai MAT SONG DATA THUC SU -> DUNG. "
+                        "KIEM TRA: SIM con data? SIM long? Cam lai SIM / khoi dong lai dien thoai.")
                 else:
-                    self._sh.recover_fails = getattr(self._sh, "recover_fails", 0) + 1
-                    self.on_log(f"  ⚠ 4G VAN chua thong sau scan (lan {self._sh.recover_fails}) "
-                                "— dien thoai co the MAT SONG DATA")
-                    if self._sh.recover_fails >= MAX_RECOVER_FAILS:
+                    # Data van co (chi la EveryProxy/forward chua kip) -> KHONG dung, retry tiep
+                    self.on_log(f"  ⚠ 4G chua thong (lan {self._sh.recover_fails}) nhung DATA con "
+                                f"-> thu lai (khong dung).")
+                    if self._sh.recover_fails >= MAX_RECOVER_FAILS * 2:
+                        # Retry qua nhieu ma van khong thong du data con -> tam dung cho lan sau
                         self._sh.p4g_dead = True
-                        self.on_log(
-                            "  🛑 4G CHET HAN (mat song data) -> DUNG. "
-                            "KIEM TRA DIEN THOAI: bat Du lieu di dong / kiem tra SIM con data / "
-                            "khoi dong lai dien thoai. (Khong phai loi tool)")
+                        self.on_log("  🛑 4G khong thong sau nhieu lan (du data con) -> dung luot nay.")
             except Exception as e:
                 self.on_log(f"  ⚠ recover 4G loi: {str(e)[:60]}")
 

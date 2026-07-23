@@ -100,23 +100,33 @@ def _dump_ui_xml_generic(device_id):
 
 
 def toggle_airplane(device_id, on=True):
-    """Bật/tắt airplane mode qua UI tap (Nokia 3.1 cần cách này, broadcast/cmd cần root).
+    """Bật/tắt airplane mode — TIN CAY (khong phu thuoc tap toa do UI).
 
-    Mở Settings > Airplane Mode, TIM toggle tu UI (khong hardcode toa do sai) roi tap.
+    CACH 1 (uu tien): `cmd connectivity airplane-mode enable/disable` (Android 9+) —
+    da test tren Nokia 3.1: doi airplane 1<->0 CHINH XAC + doi IP that, khong can root,
+    khong tap UI. -> tin cay 100% (cach cu tap toa do hay TRUOT -> ket airplane).
+    CACH 2 (fallback): tap toggle tu UI dump neu cmd khong an.
     """
-    # Wake + unlock truoc (dialog/toggle chi bam duoc khi man hinh sang)
+    want = '1' if on else '0'
+    # CACH 1: cmd connectivity (tin cay nhat)
+    try:
+        run_adb(device_id, 'shell', 'cmd', 'connectivity', 'airplane-mode',
+                'enable' if on else 'disable')
+        time.sleep(1.5)
+        if _airplane_is_on(device_id) == on:
+            return   # thanh cong
+    except Exception:
+        pass
+    # CACH 2 (fallback): tap toggle tu UI
     run_adb(device_id, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
     run_adb(device_id, 'shell', 'wm', 'dismiss-keyguard')
-    # Mở trang airplane mode settings
     run_adb(device_id, 'shell', 'am', 'start', '-a',
             'android.settings.AIRPLANE_MODE_SETTINGS')
     time.sleep(1.5)
-
-    # TIM toggle tu UI (dung toa do that). Fallback (641,717) neu khong tim thay
-    # (da do tren Nokia 3.1: toggle o [594,690][688,744] -> tam 641,717).
-    point = _find_airplane_toggle(device_id) or (641, 717)
-    run_adb(device_id, 'shell', 'input', 'tap', str(point[0]), str(point[1]))
-    time.sleep(1)
+    if _airplane_is_on(device_id) != on:   # chi tap neu chua dung trang thai
+        point = _find_airplane_toggle(device_id) or (641, 717)
+        run_adb(device_id, 'shell', 'input', 'tap', str(point[0]), str(point[1]))
+        time.sleep(1)
 
 
 def _re_forward_adb(device_id, port=10001, phone_port=1080):
@@ -300,36 +310,59 @@ def heal_device(device_id, everyproxy_port=1080, on_log=lambda *_: None):
       4. Ensure EveryProxy chay (mo app + bat SOCKS neu tat).
     -> dict {ok, data_signal, everyproxy, note}.
     """
-    result = {"ok": False, "data_signal": None, "everyproxy": False, "note": ""}
+    result = {"ok": False, "data_signal": None, "everyproxy": False,
+              "airplane_fixed": False, "note": ""}
     # 1. Dialog USB + wake
     dismiss_usb_dialog(device_id)
-    # 2. Ep USB mtp (tranh hoi lai) — best effort (co the lam adb reconnect ~vai giay)
+    # 2. QUAN TRONG (bug user chi ra): AIRPLANE co the con KET BAT sau xoay IP
+    #    -> data 'gia chet'. Check + TAT airplane + doi data hoi TRUOC khi ket luan.
+    if _airplane_is_on(device_id):
+        on_log("[heal] Airplane dang BAT (ket sau xoay IP) -> tat + cho data hoi...")
+        for _ in range(3):
+            toggle_airplane(device_id, on=False)
+            time.sleep(3)
+            if _airplane_is_on(device_id) is False:
+                break
+        result["airplane_fixed"] = True
+        # Cho radio dang ky lai data (toi 20s)
+        for _ in range(10):
+            if has_data_signal(device_id) is True:
+                break
+            time.sleep(2)
+    # 3. Ep USB mtp (tranh hoi lai) — best effort
     try:
         run_adb(device_id, 'shell', 'svc', 'usb', 'setFunctions', 'mtp')
     except Exception:
         pass
-    # 3. Stay awake
+    # 4. Stay awake
     try:
         setup_stay_awake(device_id)
     except Exception:
         pass
-    # 4. Data signal
+    # 5. Data signal (sau khi da xu ly airplane) — doi them neu chua co
     result["data_signal"] = has_data_signal(device_id)
-    # 5. EveryProxy
+    if result["data_signal"] is not True:
+        # Cho them (radio co the dang dang ky lai sau xoay IP)
+        for _ in range(8):
+            time.sleep(2)
+            if has_data_signal(device_id) is True:
+                result["data_signal"] = True
+                break
+    # 6. EveryProxy
     try:
         result["everyproxy"] = ensure_everyproxy(device_id, port=everyproxy_port, wait=8)
     except Exception:
         result["everyproxy"] = False
 
     if result["data_signal"] is False:
-        result["note"] = "Dien thoai MAT SONG DATA (SIM het data / mat mang)"
+        result["note"] = "Dien thoai MAT SONG DATA THUC SU (SIM het data / mat mang / SIM long)"
     elif not result["everyproxy"]:
         result["note"] = "EveryProxy chua bat duoc"
     else:
         result["ok"] = True
-        result["note"] = "OK"
+        result["note"] = "OK" + (" (da tat airplane ket)" if result["airplane_fixed"] else "")
     on_log(f"[heal] data={result['data_signal']} everyproxy={result['everyproxy']} "
-           f"-> {result['note']}")
+           f"airplane_fixed={result['airplane_fixed']} -> {result['note']}")
     return result
 
 def fix_ttl(device_id):
