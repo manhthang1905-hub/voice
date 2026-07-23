@@ -181,13 +181,16 @@ def rotate_ip(device_id, wait=25):
     time.sleep(3)
     _re_forward_adb(device_id)
 
-    # Chờ kết nối lại — check mỗi 3 giây
-    for _ in range(int(wait / 3)):
+    # Chờ DATA THUC SU connected lai (khong chi doc IP interface - sau airplane, ccmni0
+    # co IP noi bo 10.x truoc khi data that su len). Doi has_data_signal=True + IP doi.
+    deadline = time.time() + max(wait, 30)
+    while time.time() < deadline:
         time.sleep(3)
-        new_ip = get_device_ip(device_id)
-        if new_ip and new_ip != old_ip:
-            return new_ip
-
+        if has_data_signal(device_id) is True:
+            new_ip = get_device_ip(device_id)
+            # IP hop le + KHAC IP cu (10.x la noi bo -> chua han, cho tiep)
+            if new_ip and new_ip != old_ip and not new_ip.startswith("10."):
+                return new_ip
     return get_device_ip(device_id)
 
 def enable_usb_tethering(device_id):
